@@ -1,0 +1,15 @@
+{
+  "name": "louisa",
+  "version": "1.0.0",
+  "description": "Automatic release notes bot for Arthur Evals Engine",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel deploy --prod"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "vercel": "^39.0.0"
+  }
+}
