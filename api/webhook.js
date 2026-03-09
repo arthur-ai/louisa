@@ -32,7 +32,7 @@ export default async function handler(req, res) {
   }
 
   const release = payload.release;
-  if (release.draft || release.prerelease) {
+  if (release.draft) {
     return res.status(200).json({ skipped: true, reason: "draft or prerelease" });
   }
 
