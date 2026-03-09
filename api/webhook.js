@@ -36,8 +36,8 @@ export default async function handler(req, res) {
     return res.status(200).json({ skipped: true, reason: "draft or prerelease" });
   }
 
-  const owner = process.env.GITHUB_REPO_OWNER;
-  const repo = process.env.GITHUB_REPO_NAME;
+  const owner = payload.repository.owner.login;
+  const repo = payload.repository.name;
   const tag = release.tag_name;
   const releaseId = release.id;
 
