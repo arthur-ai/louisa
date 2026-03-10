@@ -52,7 +52,7 @@ Louisa generates release notes that are:
 | Manual release → fill in notes | ✅ | — |
 | Commit & PR/MR analysis | ✅ | ✅ |
 | Slack notifications | ✅ | ✅ |
-| Webhook signature verification | HMAC-SHA256 | Secret token |
+| Webhook signature verification | Secret token | Secret token |
 
 You can use Louisa with GitHub only, GitLab only, or both at the same time. Each platform has its own webhook endpoint, API client, and Claude prompt — so release notes are generated independently and can be customized per product.
 
