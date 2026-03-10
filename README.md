@@ -48,6 +48,7 @@ Louisa generates release notes that are:
 - An [Anthropic](https://console.anthropic.com) API key (for Claude)
 - A GitHub Personal Access Token with read/write access to your repo's contents and releases
 - Admin access to the repo (to configure the webhook)
+- A [Slack](https://slack.com) workspace with an Incoming Webhook URL (optional, for release notifications)
 
 ---
 
@@ -71,6 +72,7 @@ GITHUB_WEBHOOK_SECRET=your_webhook_secret
 ANTHROPIC_API_KEY=sk-ant-your_anthropic_key
 GITHUB_REPO_OWNER=your-org
 GITHUB_REPO_NAME=your-repo
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
 ```
 
 To generate a webhook secret:
@@ -85,6 +87,13 @@ openssl rand -hex 32
 
 **Anthropic API Key:**
 - Create one at [console.anthropic.com](https://console.anthropic.com)
+
+**Slack Incoming Webhook (optional):**
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
+2. Choose **From scratch**, name it **Louisa**, and select your workspace
+3. Go to **Incoming Webhooks** in the sidebar and toggle it on
+4. Click **Add New Webhook to Workspace** and select your releases channel (e.g. #releases)
+5. Copy the webhook URL and use it as `SLACK_WEBHOOK_URL`
 
 ### 3. Deploy to Vercel
 
@@ -119,6 +128,7 @@ louisa/
 ├── lib/
 │   ├── github.js         # GitHub API client (commits, PRs, releases)
 │   ├── claude.js          # Anthropic API client (note generation)
+│   ├── slack.js           # Slack Incoming Webhook client (release notifications)
 │   └── crypto.js          # Webhook signature verification
 ├── package.json
 ├── vercel.json
@@ -137,6 +147,21 @@ Louisa is intentionally simple — no frameworks, no SDKs, no database. Everythi
 | `lib/crypto.js` | Verifies webhook authenticity using HMAC-SHA256 with timing-safe comparison |
 | `lib/github.js` | Compares tags, fetches commits, resolves merged PRs, creates and updates releases |
 | `lib/claude.js` | Builds the prompt and calls Claude to transform raw data into formatted release notes |
+| `lib/slack.js` | Posts a release summary with a link to the full notes to a Slack channel via Incoming Webhook |
+
+---
+
+## Slack Notifications
+
+When `SLACK_WEBHOOK_URL` is configured, Louisa automatically posts a summary to your Slack channel every time release notes are published. The Slack message includes:
+
+- The release tag name
+- The theme summary from the release notes
+- A list of key areas covered in the release
+- A warning if the release includes breaking changes
+- A **"View Full Release Notes"** button linking directly to the GitHub release
+
+Slack notifications are optional. If `SLACK_WEBHOOK_URL` is not set, Louisa skips the notification silently and everything else works as normal.
 
 ---
 
