@@ -1,4 +1,4 @@
-# Louisa 🤖
+# Louisa 🐶
 
 **Automatic, AI-powered release notes for GitHub — so your team never has to write them again.**
 
