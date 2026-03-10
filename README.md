@@ -297,7 +297,7 @@ Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still ac
 - **Runtime:** Node.js (ES modules) on Vercel Serverless Functions
 - **AI:** Claude Sonnet via the Anthropic Messages API
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
-- **Auth:** HMAC-SHA256 (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
+- **Auth:** secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
 - **Notifications:** Slack Incoming Webhooks
 - **Dependencies:** None beyond Node built-ins
 
