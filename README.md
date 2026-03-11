@@ -34,9 +34,35 @@ Louisa handles multiple scenarios:
 
 ---
 
-## Powered by Arthur Evals Engine
+## What You Get
 
-> **Louisa ships with built-in AI observability via [Arthur Evals Engine](https://arthur.ai).** Every release generation — from the first GitHub API call through the Claude response to the final Slack notification — is traced in full and sent to Arthur as OpenInference-compatible OTLP spans.
+Louisa generates release notes that are:
+
+- **Grouped by product area** — not by change type. Sections like "Evaluation & Experiment Enhancements" instead of "Bug Fixes" and "Features."
+- **Written for users** — every bullet leads with the benefit or capability, not the code change.
+- **Clean and consistent** — follows a structured format with section summaries, bold feature names, and horizontal dividers.
+- **Free of internal noise** — CI changes, merge commits, and refactors are filtered out automatically.
+
+---
+
+## Platform Support
+
+| Feature | GitHub | GitLab |
+|---------|--------|--------|
+| Tag push → auto-create release | ✅ | ✅ |
+| Manual release → fill in notes | ✅ | — |
+| Commit & PR/MR analysis | ✅ | ✅ |
+| Slack notifications | ✅ | ✅ |
+| Arthur Engine tracing | ✅ | ✅ |
+| Webhook signature verification | Secret token | Secret token |
+
+You can use Louisa with GitHub only, GitLab only, or both at the same time. Each platform has its own webhook endpoint, API client, and Claude prompt — so release notes are generated independently and can be customized per product.
+
+---
+
+## Observability and evals powered by the Arthur Engine
+
+> **Louisa ships with built-in AI observability via [Arthur Evals Engine](https://github.com/arthur-ai/arthur-engine).** Every release generation — from the first GitHub API call through the Claude response to the final Slack notification — is traced in full and sent to Arthur as OpenInference-compatible OTLP spans.
 
 When Arthur is configured, you get a complete trace for every release:
 
@@ -68,32 +94,6 @@ louisa.github.release  [CHAIN]
 Instrumentation uses the official [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) package, which automatically wraps the Anthropic SDK and emits LLM spans that follow the [OpenInference semantic conventions](https://github.com/Arize-ai/openinference/tree/main/spec).
 
 **Tracing is fully optional.** If Arthur env vars are not set, Louisa silently skips all tracing — the release notes pipeline runs identically without it.
-
----
-
-## What You Get
-
-Louisa generates release notes that are:
-
-- **Grouped by product area** — not by change type. Sections like "Evaluation & Experiment Enhancements" instead of "Bug Fixes" and "Features."
-- **Written for users** — every bullet leads with the benefit or capability, not the code change.
-- **Clean and consistent** — follows a structured format with section summaries, bold feature names, and horizontal dividers.
-- **Free of internal noise** — CI changes, merge commits, and refactors are filtered out automatically.
-
----
-
-## Platform Support
-
-| Feature | GitHub | GitLab |
-|---------|--------|--------|
-| Tag push → auto-create release | ✅ | ✅ |
-| Manual release → fill in notes | ✅ | — |
-| Commit & PR/MR analysis | ✅ | ✅ |
-| Slack notifications | ✅ | ✅ |
-| Arthur Engine tracing | ✅ | ✅ |
-| Webhook signature verification | Secret token | Secret token |
-
-You can use Louisa with GitHub only, GitLab only, or both at the same time. Each platform has its own webhook endpoint, API client, and Claude prompt — so release notes are generated independently and can be customized per product.
 
 ---
 
