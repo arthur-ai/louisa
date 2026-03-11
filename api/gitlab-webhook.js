@@ -48,6 +48,13 @@ export default async function handler(req, res) {
 
   console.log(`Louisa: GitLab tag detected — ${tag} (project ${projectId})`);
 
+  // Only generate release notes for successful production platform deployments.
+  // Expected format: {version}-success-aws-prod-platform (e.g. 1.4.1892-success-aws-prod-platform)
+  if (!tag.endsWith("-success-aws-prod-platform")) {
+    console.log(`Louisa: skipping non-production tag ${tag}`);
+    return res.status(200).json({ skipped: true, reason: "non-production tag" });
+  }
+
   // Initialise the OTel provider (+ Anthropic auto-instrumentation) once per container.
   const tracer = getTracer();
 
