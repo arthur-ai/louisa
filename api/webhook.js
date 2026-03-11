@@ -42,6 +42,8 @@ export default async function handler(req, res) {
     const trace = createTrace();
     const root = trace.span("louisa.github.release", null, [
       ["openinference.span.kind", "CHAIN"],
+      ["input.value", JSON.stringify({ tag, repository: `${owner}/${repo}` })],
+      ["input.mime_type", "application/json"],
       ["tag", tag],
       ["repository", `${owner}/${repo}`],
     ]);
@@ -50,6 +52,8 @@ export default async function handler(req, res) {
       const existing = await getReleaseByTag(owner, repo, tag);
       if (existing) {
         console.log(`Louisa: release already exists for ${tag}, skipping`);
+        root.addAttr("output.value", "skipped: release already exists");
+        root.addAttr("output.mime_type", "text/plain");
         root.end();
         await trace.send().catch(() => {});
         return res.status(200).json({ skipped: true, reason: "release already exists" });
@@ -62,11 +66,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getPreviousReleaseTag"],
           ["input.value", JSON.stringify({ owner, repo, tag })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getPreviousReleaseTag(owner, repo, tag);
-          s.addAttr("output.value", result || "");
+          s.addAttr("output.value", result || "(none)");
+          s.addAttr("output.mime_type", "text/plain");
           return result;
         }
       );
@@ -79,11 +85,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getCommitsBetweenTags"],
           ["input.value", JSON.stringify({ owner, repo, base: previousTag, head: tag })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getCommitsBetweenTags(owner, repo, previousTag, tag);
-          s.addAttr("output.value", `${result.length} commits`);
+          s.addAttr("output.value", JSON.stringify(result.map(c => ({ sha: c.sha.slice(0, 7), message: c.message }))));
+          s.addAttr("output.mime_type", "application/json");
           return result;
         }
       );
@@ -97,28 +105,41 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getPullRequestsForCommits"],
           ["input.value", JSON.stringify({ owner, repo, commitCount: shas.length })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getPullRequestsForCommits(owner, repo, shas);
-          s.addAttr("output.value", `${result.length} PRs`);
+          s.addAttr("output.value", JSON.stringify(result.map(pr => ({ number: pr.number, title: pr.title }))));
+          s.addAttr("output.mime_type", "application/json");
           return result;
         }
       );
       console.log(`Louisa: found ${pullRequests.length} merged PRs`);
 
-      const notes = await traced(
+      const { text: notes, usage, systemPrompt, userContent } = await traced(
         trace,
         "claude.generate_release_notes",
         [
           ["openinference.span.kind", "LLM"],
           ["llm.model_name", "claude-sonnet-4-20250514"],
-          ["input.value", JSON.stringify({ tag, commits: commits.length, pullRequests: pullRequests.length, previousTag })],
+          ["llm.invocation_parameters", JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4096 })],
         ],
         root.spanId,
         async (s) => {
           const result = await generateReleaseNotes({ tagName: tag, releaseName: tag, commits, pullRequests, previousTag });
-          s.addAttr("output.value", result.slice(0, 2000));
+          s.addAttr("llm.system", result.systemPrompt);
+          s.addAttr("llm.input_messages.0.message.role", "user");
+          s.addAttr("llm.input_messages.0.message.content", result.userContent);
+          s.addAttr("llm.output_messages.0.message.role", "assistant");
+          s.addAttr("llm.output_messages.0.message.content", result.text);
+          s.addAttr("llm.token_count.prompt", result.usage.inputTokens);
+          s.addAttr("llm.token_count.completion", result.usage.outputTokens);
+          s.addAttr("llm.token_count.total", result.usage.totalTokens);
+          s.addAttr("input.value", result.userContent);
+          s.addAttr("input.mime_type", "text/plain");
+          s.addAttr("output.value", result.text);
+          s.addAttr("output.mime_type", "text/plain");
           return result;
         }
       );
@@ -131,11 +152,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.createRelease"],
           ["input.value", JSON.stringify({ owner, repo, tag })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await createRelease(owner, repo, tag, tag, notes + footer);
           s.addAttr("output.value", result.html_url || "");
+          s.addAttr("output.mime_type", "text/plain");
           return result;
         }
       );
@@ -148,15 +171,18 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "slack.postReleaseToSlack"],
           ["input.value", JSON.stringify({ tag, releaseUrl })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           await postReleaseToSlack(tag, releaseUrl, notes);
           s.addAttr("output.value", "sent");
+          s.addAttr("output.mime_type", "text/plain");
         }
       );
 
-      root.addAttr("output.value", `Release ${tag} created: ${releaseUrl}`);
+      root.addAttr("output.value", releaseUrl);
+      root.addAttr("output.mime_type", "text/plain");
       root.end();
       console.log(`Louisa: release created for tag ${tag}`);
       await trace.send().catch(() => {});
@@ -191,9 +217,10 @@ export default async function handler(req, res) {
     const trace = createTrace();
     const root = trace.span("louisa.github.release.update", null, [
       ["openinference.span.kind", "CHAIN"],
+      ["input.value", JSON.stringify({ tag, repository: `${owner}/${repo}`, releaseId })],
+      ["input.mime_type", "application/json"],
       ["tag", tag],
       ["repository", `${owner}/${repo}`],
-      ["releaseId", String(releaseId)],
     ]);
 
     try {
@@ -204,11 +231,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getPreviousReleaseTag"],
           ["input.value", JSON.stringify({ owner, repo, tag })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getPreviousReleaseTag(owner, repo, tag);
-          s.addAttr("output.value", result || "");
+          s.addAttr("output.value", result || "(none)");
+          s.addAttr("output.mime_type", "text/plain");
           return result;
         }
       );
@@ -221,11 +250,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getCommitsBetweenTags"],
           ["input.value", JSON.stringify({ owner, repo, base: previousTag, head: tag })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getCommitsBetweenTags(owner, repo, previousTag, tag);
-          s.addAttr("output.value", `${result.length} commits`);
+          s.addAttr("output.value", JSON.stringify(result.map(c => ({ sha: c.sha.slice(0, 7), message: c.message }))));
+          s.addAttr("output.mime_type", "application/json");
           return result;
         }
       );
@@ -239,28 +270,41 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.getPullRequestsForCommits"],
           ["input.value", JSON.stringify({ owner, repo, commitCount: shas.length })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           const result = await getPullRequestsForCommits(owner, repo, shas);
-          s.addAttr("output.value", `${result.length} PRs`);
+          s.addAttr("output.value", JSON.stringify(result.map(pr => ({ number: pr.number, title: pr.title }))));
+          s.addAttr("output.mime_type", "application/json");
           return result;
         }
       );
       console.log(`Louisa: found ${pullRequests.length} merged PRs`);
 
-      const notes = await traced(
+      const { text: notes, usage, systemPrompt, userContent } = await traced(
         trace,
         "claude.generate_release_notes",
         [
           ["openinference.span.kind", "LLM"],
           ["llm.model_name", "claude-sonnet-4-20250514"],
-          ["input.value", JSON.stringify({ tag, commits: commits.length, pullRequests: pullRequests.length, previousTag })],
+          ["llm.invocation_parameters", JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4096 })],
         ],
         root.spanId,
         async (s) => {
           const result = await generateReleaseNotes({ tagName: tag, releaseName: release.name || tag, commits, pullRequests, previousTag });
-          s.addAttr("output.value", result.slice(0, 2000));
+          s.addAttr("llm.system", result.systemPrompt);
+          s.addAttr("llm.input_messages.0.message.role", "user");
+          s.addAttr("llm.input_messages.0.message.content", result.userContent);
+          s.addAttr("llm.output_messages.0.message.role", "assistant");
+          s.addAttr("llm.output_messages.0.message.content", result.text);
+          s.addAttr("llm.token_count.prompt", result.usage.inputTokens);
+          s.addAttr("llm.token_count.completion", result.usage.outputTokens);
+          s.addAttr("llm.token_count.total", result.usage.totalTokens);
+          s.addAttr("input.value", result.userContent);
+          s.addAttr("input.mime_type", "text/plain");
+          s.addAttr("output.value", result.text);
+          s.addAttr("output.mime_type", "text/plain");
           return result;
         }
       );
@@ -273,11 +317,13 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "github.updateReleaseBody"],
           ["input.value", JSON.stringify({ owner, repo, releaseId })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           await updateReleaseBody(owner, repo, releaseId, notes + footer);
           s.addAttr("output.value", "updated");
+          s.addAttr("output.mime_type", "text/plain");
         }
       );
 
@@ -289,15 +335,18 @@ export default async function handler(req, res) {
           ["openinference.span.kind", "TOOL"],
           ["tool.name", "slack.postReleaseToSlack"],
           ["input.value", JSON.stringify({ tag, releaseUrl })],
+          ["input.mime_type", "application/json"],
         ],
         root.spanId,
         async (s) => {
           await postReleaseToSlack(tag, releaseUrl, notes);
           s.addAttr("output.value", "sent");
+          s.addAttr("output.mime_type", "text/plain");
         }
       );
 
-      root.addAttr("output.value", `Release ${tag} updated: ${releaseUrl}`);
+      root.addAttr("output.value", releaseUrl);
+      root.addAttr("output.mime_type", "text/plain");
       root.end();
       console.log(`Louisa: release ${tag} updated successfully`);
       await trace.send().catch(() => {});
