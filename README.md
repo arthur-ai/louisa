@@ -21,15 +21,53 @@ Webhook fires ──► Vercel serverless function
         ├─► Verifies webhook signature
         ├─► Fetches commits between this tag and the previous release
         ├─► Fetches merged pull requests (GitHub) or merge requests (GitLab)
-        ├─► Sends everything to Claude for analysis and summarization
+        ├─► Calls Claude via the Anthropic SDK to generate release notes
         ├─► Creates a published Release with formatted notes
-        └─► Posts a summary to Slack (optional)
+        ├─► Posts a summary to Slack (optional)
+        └─► Sends full OpenInference traces to Arthur Engine (optional)
 ```
 
 Louisa handles multiple scenarios:
 
 - **Tag push (GitHub or GitLab)** — Automatically creates a published release with generated notes. No one needs to touch the Releases page manually.
 - **Manual release (GitHub)** — If someone creates a release by hand, Louisa detects it and fills in the release notes if they're empty.
+
+---
+
+## Powered by Arthur Evals Engine
+
+> **Louisa ships with built-in AI observability via [Arthur Evals Engine](https://arthur.ai).** Every release generation — from the first GitHub API call through the Claude response to the final Slack notification — is traced in full and sent to Arthur as OpenInference-compatible OTLP spans.
+
+When Arthur is configured, you get a complete trace for every release:
+
+```
+louisa.github.release  [CHAIN]
+│
+├── github.get_previous_tag       [TOOL]   → "v1.4.2"
+├── github.get_commits            [TOOL]   → 14 commits
+├── github.get_pull_requests      [TOOL]   → 6 merged PRs
+├── anthropic.messages.create     [LLM]    → claude-sonnet-4-20250514
+│       input tokens: 3,847  output tokens: 812
+│       system prompt, user message, full assistant response
+├── github.create_release         [TOOL]   → https://github.com/…/releases/tag/v1.5.0
+└── slack.post_notification       [TOOL]   → sent
+```
+
+**What Arthur captures automatically:**
+
+| Signal | Details |
+|--------|---------|
+| LLM inputs & outputs | Full system prompt, user message, and generated release notes |
+| Token usage | Prompt, completion, and cache token counts per request |
+| Model metadata | Model name, provider, invocation parameters |
+| Tool calls | Each GitHub / GitLab / Slack API call with inputs and outputs |
+| Latency | Wall-clock duration of every span |
+| Errors | Full error messages on any failed step |
+| Session linking | All traces tied to your Louisa task in the Arthur dashboard |
+
+Instrumentation uses the official [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) package, which automatically wraps the Anthropic SDK and emits LLM spans that follow the [OpenInference semantic conventions](https://github.com/Arize-ai/openinference/tree/main/spec).
+
+**Tracing is fully optional.** If Arthur env vars are not set, Louisa silently skips all tracing — the release notes pipeline runs identically without it.
 
 ---
 
@@ -52,6 +90,7 @@ Louisa generates release notes that are:
 | Manual release → fill in notes | ✅ | — |
 | Commit & PR/MR analysis | ✅ | ✅ |
 | Slack notifications | ✅ | ✅ |
+| Arthur Engine tracing | ✅ | ✅ |
 | Webhook signature verification | Secret token | Secret token |
 
 You can use Louisa with GitHub only, GitLab only, or both at the same time. Each platform has its own webhook endpoint, API client, and Claude prompt — so release notes are generated independently and can be customized per product.
@@ -75,6 +114,7 @@ You can use Louisa with GitHub only, GitLab only, or both at the same time. Each
 
 **Optional:**
 - A [Slack](https://slack.com) workspace with an Incoming Webhook URL (for release notifications)
+- An [Arthur Evals Engine](https://arthur.ai) account with a task configured (for AI observability)
 
 ---
 
@@ -109,6 +149,11 @@ GITLAB_PROJECT_ID=12345678
 
 # ── Slack (optional) ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
+
+# ── Arthur Evals Engine (optional) ──
+ARTHUR_BASE_URL=https://your-engine.arthur.ai
+ARTHUR_API_KEY=your_arthur_api_key
+ARTHUR_TASK_ID=your_task_id
 ```
 
 To generate webhook secrets:
@@ -127,6 +172,11 @@ openssl rand -hex 32
 
 **Anthropic API Key:**
 - Create one at [console.anthropic.com](https://console.anthropic.com)
+
+**Arthur Evals Engine:**
+- `ARTHUR_BASE_URL` — the base URL of your Arthur Engine instance
+- `ARTHUR_API_KEY` — your Arthur Engine API key (Bearer token)
+- `ARTHUR_TASK_ID` — the task ID to link traces to (found in the Arthur dashboard); if omitted, Arthur auto-creates a task named `louisa`
 
 **Slack Incoming Webhook (optional):**
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app
@@ -175,10 +225,11 @@ louisa/
 │   ├── webhook.js            # GitHub webhook handler
 │   └── gitlab-webhook.js     # GitLab webhook handler
 ├── lib/
+│   ├── otel.js                # OpenTelemetry + OpenInference tracing setup
 │   ├── github.js              # GitHub API client (commits, PRs, releases)
 │   ├── gitlab.js              # GitLab API client (commits, MRs, releases)
-│   ├── claude.js              # Claude prompt for GitHub product release notes
-│   ├── claude-platform.js     # Claude prompt for GitLab product release notes
+│   ├── claude.js              # Anthropic SDK client for GitHub release notes
+│   ├── claude-platform.js     # Anthropic SDK client for GitLab release notes
 │   ├── slack.js               # Slack Incoming Webhook client
 │   └── crypto.js              # GitHub webhook signature verification
 ├── package.json
@@ -190,18 +241,27 @@ louisa/
 
 ## Architecture
 
-Louisa is intentionally simple — no frameworks, no SDKs, no database. Everything runs in Vercel serverless functions using native `fetch` calls to the GitHub, GitLab, and Anthropic APIs.
-
 | Component | Purpose |
 |-----------|---------|
 | `api/webhook.js` | Receives GitHub webhooks, routes tag and release events, orchestrates the GitHub pipeline |
 | `api/gitlab-webhook.js` | Receives GitLab webhooks, handles tag push events, orchestrates the GitLab pipeline |
+| `lib/otel.js` | Lazy-initialises the OpenTelemetry provider, patches the Anthropic SDK for auto-instrumentation, exports `getTracer`, `forceFlush`, and `activeSpan` |
 | `lib/crypto.js` | Verifies GitHub webhook authenticity using HMAC-SHA256 with timing-safe comparison |
 | `lib/github.js` | Compares tags, fetches commits, resolves merged PRs, creates and updates GitHub releases |
 | `lib/gitlab.js` | Compares tags, fetches commits, resolves merged MRs, creates GitLab releases |
-| `lib/claude.js` | Claude prompt tailored for GitHub product release notes |
-| `lib/claude-platform.js` | Claude prompt tailored for GitLab product release notes |
+| `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
+| `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
 | `lib/slack.js` | Posts release summaries to Slack, auto-detects which product the release is for |
+
+### Tracing architecture
+
+`lib/otel.js` initialises once per serverless container:
+
+1. Creates a `NodeTracerProvider` with an `OTLPTraceExporter` pointed at `ARTHUR_BASE_URL/api/v1/traces`
+2. Calls `AnthropicInstrumentation.manuallyInstrument(Anthropic)` to patch the SDK class — from this point, every `client.messages.create()` call automatically emits a fully-attributed `LLM` span following the OpenInference spec
+3. Registers the provider as the global OTel tracer
+
+The webhook handlers wrap each logical step in an `activeSpan()` call (CHAIN for the overall pipeline, TOOL for each API call). Because OTel context propagation uses `AsyncLocalStorage`, when `generateReleaseNotes()` calls `client.messages.create()` inside an active CHAIN span, the auto-instrumented LLM span is automatically nested as a child — no manual wiring required.
 
 ---
 
@@ -290,16 +350,22 @@ Louisa checks for existing releases before creating one and skips if notes are a
 **Slack notification not posting**
 Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still active in your Slack app settings. Check Vercel logs for `Louisa: Slack post failed` messages.
 
+**No traces appearing in Arthur Engine**
+- Verify `ARTHUR_BASE_URL` and `ARTHUR_API_KEY` are set in Vercel and match your Arthur instance
+- Check Vercel logs for `Louisa: Arthur trace failed` or `Louisa: trace flush error` messages
+- Ensure the Vercel function timeout (`maxDuration: 60`) is long enough for `forceFlush()` to complete before the container is recycled
+- Arthur auto-creates a task named `louisa` on first trace receipt — look for it in the Arthur dashboard if you haven't set `ARTHUR_TASK_ID`
+
 ---
 
 ## How It's Built
 
 - **Runtime:** Node.js (ES modules) on Vercel Serverless Functions
-- **AI:** Claude Sonnet via the Anthropic Messages API
+- **AI:** Claude Sonnet via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official TypeScript/JavaScript SDK
+- **Observability:** OpenTelemetry SDK + [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) for automatic LLM span instrumentation, OTLP/proto export to [Arthur Evals Engine](https://arthur.ai)
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
-- **Auth:** secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
+- **Auth:** Secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
 - **Notifications:** Slack Incoming Webhooks
-- **Dependencies:** None beyond Node built-ins
 
 ---
 
