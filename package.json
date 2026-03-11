@@ -8,8 +8,16 @@
     "dev": "vercel dev",
     "deploy": "vercel deploy --prod"
   },
-  "dependencies": {},
   "devDependencies": {
-    "vercel": "^39.0.0"
+    "vercel": "^50.31.1"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@arizeai/openinference-instrumentation-anthropic": "^0.1.7",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.213.0",
+    "@opentelemetry/resources": "^2.6.0",
+    "@opentelemetry/sdk-trace-node": "^2.6.0",
+    "@opentelemetry/semantic-conventions": "^1.40.0"
   }
 }
