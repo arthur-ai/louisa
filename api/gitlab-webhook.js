@@ -91,36 +91,47 @@ export default async function handler(req, res) {
       });
       console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
 
-      const commits = await activeSpan(tracer, "gitlab.get_commits", {
+      // Fetch commits from both platform repos (backend + frontend) in parallel if a second
+      // project ID is configured. Falls back to single-repo mode when not set.
+      const rawScopeId    = process.env.GITLAB_SCOPE_PROJECT_ID;
+      const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
+      const [backendCommits, frontendCommits] = await activeSpan(tracer, "gitlab.get_commits", {
         "openinference.span.kind": "TOOL",
         "tool.name":               "gitlab.getCommitsBetweenTags",
-        "tool.description":        "Retrieves all commits between two tags to identify what changed in this release",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", base: "string", head: "string" }),
-        "input.value":             JSON.stringify({ projectId, base: previousTag, head: tag }),
+        "tool.description":        "Retrieves all commits between two tags across both platform repos (backend + frontend)",
+        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", base: "string", head: "string" }),
+        "input.value":             JSON.stringify({ projectId, scopeProjectId, base: previousTag, head: tag }),
         "input.mime_type":         "application/json",
       }, async (s) => {
-        const r = await getCommitsBetweenTags(projectId, previousTag, tag);
-        s.setAttribute("output.value",     JSON.stringify(r.map(c => ({ sha: c.sha.slice(0, 7), message: c.message }))));
+        const [bc, fc] = await Promise.all([
+          getCommitsBetweenTags(projectId, previousTag, tag),
+          scopeProjectId ? getCommitsBetweenTags(scopeProjectId, previousTag, tag) : Promise.resolve([]),
+        ]);
+        s.setAttribute("output.value",     JSON.stringify({ backend: bc.length, frontend: fc.length }));
         s.setAttribute("output.mime_type", "application/json");
-        return r;
+        return [bc, fc];
       });
-      console.log(`Louisa: found ${commits.length} commits`);
+      const commits = [...backendCommits, ...frontendCommits];
+      console.log(`Louisa: found ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
 
-      const shas = commits.map((c) => c.sha);
-      const mergeRequests = await activeSpan(tracer, "gitlab.get_merge_requests", {
+      const [backendMRs, frontendMRs] = await activeSpan(tracer, "gitlab.get_merge_requests", {
         "openinference.span.kind": "TOOL",
         "tool.name":               "gitlab.getMergeRequestsForCommits",
-        "tool.description":        "Fetches merged MRs associated with the release commits to enrich release notes with context",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", shas: "string[]" }),
-        "input.value":             JSON.stringify({ projectId, commitCount: shas.length }),
+        "tool.description":        "Fetches merged MRs from both platform repos associated with the release commits",
+        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", shas: "string[]" }),
+        "input.value":             JSON.stringify({ projectId, scopeProjectId, backendCommits: backendCommits.length, frontendCommits: frontendCommits.length }),
         "input.mime_type":         "application/json",
       }, async (s) => {
-        const r = await getMergeRequestsForCommits(projectId, shas);
-        s.setAttribute("output.value",     JSON.stringify(r.map(mr => ({ number: mr.number, title: mr.title }))));
+        const [bmr, fmr] = await Promise.all([
+          getMergeRequestsForCommits(projectId, backendCommits.map((c) => c.sha)),
+          scopeProjectId ? getMergeRequestsForCommits(scopeProjectId, frontendCommits.map((c) => c.sha)) : Promise.resolve([]),
+        ]);
+        s.setAttribute("output.value",     JSON.stringify([...bmr, ...fmr].map(mr => ({ number: mr.number, title: mr.title }))));
         s.setAttribute("output.mime_type", "application/json");
-        return r;
+        return [bmr, fmr];
       });
-      console.log(`Louisa: found ${mergeRequests.length} merged MRs`);
+      const mergeRequests = [...backendMRs, ...frontendMRs];
+      console.log(`Louisa: found ${mergeRequests.length} merged MRs (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
 
       // generatePlatformReleaseNotes() calls client.messages.create() internally.
       // AnthropicInstrumentation auto-creates an LLM span as a child of rootSpan.
