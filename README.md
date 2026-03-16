@@ -320,7 +320,7 @@ node scripts/draft-blog.js "March 2026" --days 30
 `.github/workflows/draft-blog.yml` triggers automatically on the 24th of each month. It runs the backfill step first (to catch any releases that happened since the last log write), then drafts the post.
 
 **Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`
-**Required secrets:** also add `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME` (stored as secrets, not variables, to keep org/repo names masked in public workflow logs)
+**Required secrets:** also add `REPO_OWNER`, `REPO_NAME` (stored as secrets to keep org/repo names masked in public workflow logs)
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
@@ -347,7 +347,7 @@ node scripts/publish-changelog.js "March 2026"
 `.github/workflows/publish-changelog.yml` triggers automatically on the 28th of each month. It runs the backfill step first, then publishes.
 
 **Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`
-**Required secrets:** also add `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME` (stored as secrets, not variables, to keep org/repo names masked in public workflow logs)
+**Required secrets:** also add `REPO_OWNER`, `REPO_NAME` (stored as secrets to keep org/repo names masked in public workflow logs)
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
