@@ -231,4 +231,4 @@ const result    = await response.json();
 const entrySlug = result.slug || existing?.slug || monthSlug;
 
 console.log(`\n✓ ${existing ? "Updated" : "Published"}: ${title}`);
-console.log(`  https://docs.arthur.ai/changelog#${entrySlug}`);
+console.log(`  https://docs.arthur.ai/changelog/${entrySlug}`);
