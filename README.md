@@ -151,6 +151,9 @@ GITLAB_PROJECT_ID=12345678
 # ── Slack (optional) ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
 
+# ── readme.io (for changelog publishing) ──
+README_API_KEY=rdme_your_readme_api_key
+
 # ── Arthur Evals Engine (optional) ──
 ARTHUR_BASE_URL=https://your-engine.arthur.ai
 ARTHUR_API_KEY=your_arthur_api_key
@@ -235,10 +238,12 @@ louisa/
 │   └── crypto.js              # GitHub webhook signature verification
 ├── scripts/
 │   ├── backfill-log.js        # Seed monthly log from existing GitHub/GitLab releases
-│   └── draft-blog.js          # Generate monthly blog post from release logs
+│   ├── draft-blog.js          # Generate monthly blog post from release logs
+│   └── publish-changelog.js   # Publish combined monthly changelog to readme.io
 ├── .github/
 │   └── workflows/
-│       └── draft-blog.yml     # Auto-drafts blog post on the 24th of each month
+│       ├── draft-blog.yml          # Auto-drafts blog post on the 24th of each month
+│       └── publish-changelog.yml   # Auto-publishes changelog to readme.io on the 28th
 ├── logs/                      # Monthly release logs — gitignored, created at runtime
 ├── output/                    # Generated blog drafts — gitignored, created at runtime
 ├── package.json
@@ -263,6 +268,7 @@ louisa/
 | `lib/slack.js` | Posts release summaries to Slack; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful post |
 | `scripts/backfill-log.js` | Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
 | `scripts/draft-blog.js` | Reads monthly release log entries and calls Claude to draft the Arthur "What's New" blog post in Ashley's voice |
+| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, then creates or updates the entry on readme.io |
 
 ### Tracing architecture
 
@@ -317,6 +323,35 @@ node scripts/draft-blog.js "March 2026" --days 30
 **Required repository variables:** `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
+
+---
+
+## Monthly Changelog Publishing
+
+On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately (`hidden: false`). If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
+
+### Run it manually
+
+```bash
+# 1. Seed the log (if not already done)
+node scripts/backfill-log.js <github-owner> <github-repo> --days 30
+
+# 2. Publish to readme.io
+set -a && source .env.local && set +a
+node scripts/publish-changelog.js "March 2026"
+# Output: creates or updates "March 2026 Release Notes" on docs.arthur.ai/changelog
+```
+
+### Automated via GitHub Actions
+
+`.github/workflows/publish-changelog.yml` triggers automatically on the 28th of each month. It runs the backfill step first, then publishes.
+
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`
+**Required repository variables:** `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`
+
+You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
+
+> **Note:** The readme.io changelog API (`dash.readme.com/api/v1/changelogs`) is available for projects on the classic ReadMe experience. If you see a 404, your project may be using ReadMe Refactored — check with your readme.io account settings.
 
 ---
 
