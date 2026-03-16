@@ -24,6 +24,7 @@ Webhook fires ──► Vercel serverless function
         ├─► Calls Claude via the Anthropic SDK to generate release notes
         ├─► Creates a published Release with formatted notes
         ├─► Posts a summary to Slack (optional)
+        │       └─► Logs release metadata to ./logs/ for monthly blog drafting
         └─► Sends full OpenInference traces to Arthur Engine (optional)
 ```
 
@@ -230,8 +231,16 @@ louisa/
 │   ├── gitlab.js              # GitLab API client (commits, MRs, releases)
 │   ├── claude.js              # Anthropic SDK client for GitHub release notes
 │   ├── claude-platform.js     # Anthropic SDK client for GitLab release notes
-│   ├── slack.js               # Slack Incoming Webhook client
+│   ├── slack.js               # Slack Incoming Webhook client + monthly release logger
 │   └── crypto.js              # GitHub webhook signature verification
+├── scripts/
+│   ├── backfill-log.js        # Seed monthly log from existing GitHub/GitLab releases
+│   └── draft-blog.js          # Generate monthly blog post from release logs
+├── .github/
+│   └── workflows/
+│       └── draft-blog.yml     # Auto-drafts blog post on the 24th of each month
+├── logs/                      # Monthly release logs — gitignored, created at runtime
+├── output/                    # Generated blog drafts — gitignored, created at runtime
 ├── package.json
 ├── vercel.json
 └── .env.local                  # Local environment variables (not committed)
@@ -251,7 +260,9 @@ louisa/
 | `lib/gitlab.js` | Compares tags, fetches commits, resolves merged MRs, creates GitLab releases |
 | `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
 | `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
-| `lib/slack.js` | Posts release summaries to Slack, auto-detects which product the release is for |
+| `lib/slack.js` | Posts release summaries to Slack; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful post |
+| `scripts/backfill-log.js` | Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
+| `scripts/draft-blog.js` | Reads monthly release log entries and calls Claude to draft the Arthur "What's New" blog post in Ashley's voice |
 
 ### Tracing architecture
 
@@ -277,6 +288,35 @@ When `SLACK_WEBHOOK_URL` is configured, Louisa automatically posts a summary to 
 - A **"View Full Release Notes"** button linking directly to the GitHub or GitLab release
 
 Slack notifications are optional. If `SLACK_WEBHOOK_URL` is not set, Louisa skips the notification silently and everything else works as normal.
+
+---
+
+## Monthly Blog Post Drafting
+
+Louisa doubles as a blog-drafting assistant. After each successful Slack notification, she logs structured metadata for that release — tag, product, theme, key areas, breaking changes, and the full generated notes — to a monthly newline-delimited JSON file at `./logs/releases-{month}.json.lines`.
+
+On the 24th of each month, a GitHub Action reads the last 30 days of those log entries and calls Claude to draft Arthur's "What's New" monthly blog post in Ashley's voice. The draft lands in `output/blog-draft-{month}.md` and is uploaded as a GitHub Actions artifact, giving the team one week to review and polish before publishing.
+
+### Run it manually
+
+```bash
+# 1. Seed the log from the last 30 days of already-published releases
+#    (reads existing release note bodies — no Claude calls, safe to re-run)
+node scripts/backfill-log.js <github-owner> <github-repo> --days 30
+
+# 2. Generate the blog draft
+node scripts/draft-blog.js "March 2026" --days 30
+# Output: output/blog-draft-march-2026.md
+```
+
+### Automated via GitHub Actions
+
+`.github/workflows/draft-blog.yml` triggers automatically on the 24th of each month. It runs the backfill step first (to catch any releases that happened since the last log write), then drafts the post.
+
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`
+**Required repository variables:** `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME`
+
+You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
 ---
 

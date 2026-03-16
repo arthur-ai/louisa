@@ -1,0 +1,55 @@
+name: Draft Monthly Blog Post
+
+on:
+  schedule:
+    # Run on the 24th of each month — one week before month end — so the team
+    # has time to review, polish, and schedule the post before publication.
+    - cron: "0 9 24 * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Month to draft (e.g. "March 2026"). Defaults to current month.'
+        required: false
+
+jobs:
+  draft-blog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine month
+        id: month
+        run: |
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            echo "value=${{ github.event.inputs.month }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(date '+%B %Y')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backfill release log (last 30 days)
+        env:
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          GITLAB_TOKEN:      ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROJECT_ID: ${{ secrets.GITLAB_PROJECT_ID }}
+        run: node scripts/backfill-log.js ${{ vars.GITHUB_REPO_OWNER }} ${{ vars.GITHUB_REPO_NAME }} --days 30
+
+      - name: Draft blog post
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: node scripts/draft-blog.js "${{ steps.month.outputs.value }}" --days 30
+
+      - name: Upload draft as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blog-draft-${{ steps.month.outputs.value }}
+          path: output/blog-draft-*.md
+          retention-days: 30
