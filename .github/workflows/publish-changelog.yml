@@ -40,7 +40,7 @@ jobs:
           GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
           GITLAB_TOKEN:      ${{ secrets.GITLAB_TOKEN }}
           GITLAB_PROJECT_ID: ${{ secrets.GITLAB_PROJECT_ID }}
-        run: node scripts/backfill-log.js ${{ vars.GITHUB_REPO_OWNER }} ${{ vars.GITHUB_REPO_NAME }} --days 30
+        run: node scripts/backfill-log.js ${{ secrets.GITHUB_REPO_OWNER }} ${{ secrets.GITHUB_REPO_NAME }} --days 30
 
       - name: Publish changelog to readme.io
         env:
