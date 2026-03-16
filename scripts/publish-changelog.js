@@ -200,7 +200,7 @@ if (!listRes.ok) {
 const changelogs = await listRes.json();
 const existing   = changelogs.find((c) => c.title === title);
 
-const payload = { title, body, type: "improved", hidden: false };
+const payload = { title, body, type: "", hidden: false };
 
 let response;
 if (existing) {
