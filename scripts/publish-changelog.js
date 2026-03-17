@@ -179,8 +179,8 @@ console.log(
 
 // ── Upsert to readme.io ───────────────────────────────────────────────────────
 
-const readmeAuth = `Basic ${Buffer.from(`${process.env.README_API_KEY}:`).toString("base64")}`;
-const readmeBase = "https://dash.readme.com/api/v1";
+const readmeAuth = `Bearer ${process.env.README_API_KEY}`;
+const readmeBase = "https://api.readme.com/v2";
 
 // Check for an existing entry with the same title
 console.log(`Checking readme.io for existing entry: "${title}"...`);
@@ -197,16 +197,24 @@ if (!listRes.ok) {
   process.exit(1);
 }
 
-const changelogs = await listRes.json();
-const existing   = changelogs.find((c) => c.title === title);
+const { data: changelogs } = await listRes.json();
+const existing             = changelogs.find((c) => c.title === title);
 
-const payload = { title, body, type: "", hidden: false };
+const authorId = process.env.README_AUTHOR_ID || null;
+const payload = {
+  title,
+  content:  { body },
+  type:     "none",
+  privacy:  { view: "public" },
+  ...(authorId ? { author: { id: authorId } } : {}),
+};
 
 let response;
 if (existing) {
+  // v2 PUT uses the entry's uri (contains the MongoDB _id), not the slug
   console.log(`Found existing entry (slug: ${existing.slug}) — updating...`);
-  response = await fetch(`${readmeBase}/changelogs/${existing.slug}`, {
-    method:  "PUT",
+  response = await fetch(`https://api.readme.com/v2${existing.uri}`, {
+    method:  "PATCH",
     headers: { Authorization: readmeAuth, "Content-Type": "application/json" },
     body:    JSON.stringify(payload),
   });
@@ -222,7 +230,7 @@ if (existing) {
 if (!response.ok) {
   const errText = await response.text();
   console.error(
-    `readme.io ${existing ? "PUT" : "POST"} failed: ${response.status} — ${errText}`
+    `readme.io ${existing ? "PATCH" : "POST"} failed: ${response.status} — ${errText}`
   );
   process.exit(1);
 }
