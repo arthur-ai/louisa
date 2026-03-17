@@ -236,7 +236,61 @@ if (!response.ok) {
 }
 
 const result    = await response.json();
-const entrySlug = result.slug || existing?.slug || monthSlug;
+const entrySlug = result.data?.slug || result.slug || existing?.slug || monthSlug;
+const entryUrl  = `https://docs.arthur.ai/changelog/${entrySlug}`;
 
 console.log(`\n✓ ${existing ? "Updated" : "Published"}: ${title}`);
-console.log(`  https://docs.arthur.ai/changelog/${entrySlug}`);
+console.log(`  ${entryUrl}`);
+
+// ── Slack notification ────────────────────────────────────────────────────────
+
+const slackWebhook = process.env.SLACK_WEBHOOK_URL;
+if (!slackWebhook) {
+  console.warn("SLACK_WEBHOOK_URL not set — skipping Slack notification");
+} else {
+  const products = Object.keys(groups);
+  const productList = products.map((p) => `• ${p}`).join("\n");
+
+  const slackPayload = {
+    blocks: [
+      {
+        type: "header",
+        text: { type: "plain_text", text: `📋 ${title}`, emoji: true },
+      },
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `The combined monthly changelog is live on docs.arthur.ai.\n\n*Products covered:*\n${productList}`,
+        },
+      },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            text: { type: "plain_text", text: "View Changelog", emoji: true },
+            url: entryUrl,
+            style: "primary",
+          },
+        ],
+      },
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: "_Posted by Louisa_" }],
+      },
+    ],
+  };
+
+  const slackRes = await fetch(slackWebhook, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(slackPayload),
+  });
+
+  if (!slackRes.ok) {
+    console.error(`Slack notification failed: ${slackRes.status} — ${await slackRes.text()}`);
+  } else {
+    console.log("Slack notification sent.");
+  }
+}
