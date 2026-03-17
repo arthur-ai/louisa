@@ -146,7 +146,7 @@ Instrumentation uses the official [`@arizeai/openinference-instrumentation-anthr
 
 **Optional:**
 - A [Slack](https://slack.com) workspace with an Incoming Webhook URL (for release notifications)
-- A [Microsoft Teams](https://teams.microsoft.com) channel with an Incoming Webhook URL (for release notifications — use Slack, Teams, or both)
+- A [Microsoft Teams](https://teams.microsoft.com) channel with an Incoming Webhook URL (for release notifications)
 - An [Arthur Evals Engine](https://arthur.ai) account with a task configured (for AI observability)
 
 ---
