@@ -29,12 +29,16 @@ Webhook fires ──► Vercel serverless function
 
 ─────────────────────────────────────────────────────────────────
 
-On the 24th of each month (GitHub Actions):
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  OPTIONAL: Monthly content pipelines (GitHub Actions)       ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+On the 24th of each month — Blog Post Drafting:
         │
         ├─► Backfills release log from GitHub + GitLab APIs
         └─► Calls Claude to draft "What's New" blog post → artifact for team review
 
-On the 28th of each month (GitHub Actions):
+On the 28th of each month — Changelog Publishing:
         │
         ├─► Backfills release log from GitHub + GitLab APIs
         ├─► Calls Claude to synthesize combined changelog (Platform + Engine)
@@ -51,12 +55,24 @@ Louisa handles multiple scenarios:
 
 ## What You Get
 
-Louisa generates release notes that are:
+### Core: Automatic release notes
+
+Louisa generates release notes on every tag push that are:
 
 - **Grouped by product area** — not by change type. Sections like "Evaluation & Experiment Enhancements" instead of "Bug Fixes" and "Features."
 - **Written for users** — every bullet leads with the benefit or capability, not the code change.
 - **Clean and consistent** — follows a structured format with section summaries, bold feature names, and horizontal dividers.
 - **Free of internal noise** — CI changes, merge commits, and refactors are filtered out automatically.
+
+### Optional: Monthly content pipelines
+
+Louisa also ships two optional GitHub Actions pipelines that build on the release notes she generates:
+
+- **Blog Post Drafting** — On the 24th of each month, Claude drafts a "What's New" blog post from the month's releases. Instead of a PM manually reading through every release to write something for your blog, the draft arrives ready for a final editorial pass. Output is uploaded as a GitHub Actions artifact so the team can review, polish, and publish.
+
+- **Changelog Publishing** — On the 28th of each month, Claude synthesizes a single structured changelog entry covering all products and publishes it directly to your developer docs via the readme.io API. No manual copy-pasting from multiple repos, no stale external changelog. A Slack/Teams notification fires once it's live.
+
+These pipelines are **entirely optional** — they have no effect on Louisa's core release notes generation and require no extra setup unless you want them.
 
 ---
 
@@ -170,7 +186,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
 # ── Microsoft Teams (optional) ──
 TEAMS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/xxx
 
-# ── readme.io (for changelog publishing) ──
+# ── readme.io (optional — only needed for Monthly Changelog Publishing) ──
 README_API_KEY=rdme_your_readme_api_key
 README_AUTHOR_ID=your_readme_user_id
 
@@ -267,12 +283,12 @@ louisa/
 │   └── crypto.js              # GitHub webhook signature verification
 ├── scripts/
 │   ├── backfill-log.js        # Seed monthly log from existing GitHub/GitLab releases
-│   ├── draft-blog.js          # Generate monthly blog post from release logs
-│   └── publish-changelog.js   # Publish combined monthly changelog to readme.io
+│   ├── draft-blog.js          # [optional] Generate monthly blog post from release logs
+│   └── publish-changelog.js   # [optional] Publish combined monthly changelog to readme.io
 ├── .github/
 │   └── workflows/
-│       ├── draft-blog.yml          # Auto-drafts blog post on the 24th of each month
-│       └── publish-changelog.yml   # Auto-publishes changelog to readme.io on the 28th
+│       ├── draft-blog.yml          # [optional] Auto-drafts blog post on the 24th of each month
+│       └── publish-changelog.yml   # [optional] Auto-publishes changelog to readme.io on the 28th
 ├── logs/                      # Monthly release logs — gitignored, created at runtime
 ├── output/                    # Generated blog drafts — gitignored, created at runtime
 ├── package.json
@@ -295,9 +311,9 @@ louisa/
 | `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
 | `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
 | `lib/slack.js` | Posts release notifications to Slack and/or Teams via `postReleaseNotification`; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful dispatch |
-| `scripts/backfill-log.js` | Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
-| `scripts/draft-blog.js` | Reads monthly release log entries and calls Claude to draft the Arthur "What's New" blog post in Ashley's voice |
-| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, creates or updates the entry on readme.io, and posts a Slack and/or Teams notification with a link to the published changelog |
+| `scripts/backfill-log.js` | *(optional pipeline)* Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
+| `scripts/draft-blog.js` | *(optional pipeline)* Reads monthly release log entries and calls Claude to draft a "What's New" blog post |
+| `scripts/publish-changelog.js` | *(optional pipeline)* Reads monthly release logs, calls Claude to synthesize a combined changelog, creates or updates the entry on readme.io, and posts a Slack/Teams notification |
 
 ### Tracing architecture
 
@@ -335,11 +351,13 @@ On the 28th of each month, the same channels also receive a notification linking
 
 ---
 
-## Monthly Blog Post Drafting
+## Optional: Monthly Blog Post Drafting
 
-Louisa doubles as a blog-drafting assistant. After each successful release notification (Slack, Teams, or both), she logs structured metadata for that release — tag, product, theme, key areas, breaking changes, and the full generated notes — to a monthly newline-delimited JSON file at `./logs/releases-{month}.json.lines`.
+> **This is an optional pipeline.** It has no effect on Louisa's core release notes generation. Enable it if your team publishes a monthly "What's New" blog post and wants a first draft written automatically.
 
-On the 24th of each month, a GitHub Action reads the last 30 days of those log entries and calls Claude to draft Arthur's "What's New" monthly blog post in Ashley's voice. The draft lands in `output/blog-draft-{month}.md` and is uploaded as a GitHub Actions artifact, giving the team one week to review and polish before publishing.
+Writing a monthly product blog post manually means a PM has to track down every release, read through the notes, and write something coherent that speaks to users rather than commit history — every single month. With multiple products and repos, that's a meaningful time sink just to produce a first draft.
+
+Louisa solves this by accumulating structured metadata as she generates release notes each month. After each release notification fires, she logs the tag, product, theme, key areas, and the full generated notes to a monthly file at `./logs/releases-{month}.json.lines`. On the 24th of each month, a GitHub Action reads those entries and calls Claude to draft a polished "What's New" post. The draft lands in `output/blog-draft-{month}.md` and is uploaded as a GitHub Actions artifact — ready for a final editorial pass, not a blank page.
 
 ### Run it manually
 
@@ -363,9 +381,15 @@ You can also trigger it manually from the **Actions** tab with an optional month
 
 ---
 
-## Monthly Changelog Publishing
+## Optional: Monthly Changelog Publishing
 
-On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately and attributed to the configured author. Once published, Louisa posts a notification to any configured channels (Slack, Teams, or both) with a direct link to the new entry. If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
+> **This is an optional pipeline.** It has no effect on Louisa's core release notes generation. Enable it if you maintain a public-facing developer changelog (e.g. on readme.io) and want it updated automatically every month.
+
+If you ship across multiple repos and products, keeping an external changelog current is a coordination problem. Someone has to manually aggregate releases from GitHub, GitLab, or wherever else your code lives, write a combined summary that reads consistently, and update the entry on your docs site. Do it late and your changelog goes stale. Do it manually every month and it becomes a recurring chore.
+
+Louisa eliminates this entirely. On the 28th of each month, a GitHub Action pulls all releases logged during the month from both Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub), calls Claude to synthesize a single structured entry organized by product, and creates or updates the entry on [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API — attributed to your team's account, published immediately. A Slack/Teams notification fires once it's live so the team knows without having to check.
+
+If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
 
 ### Run it manually
 
