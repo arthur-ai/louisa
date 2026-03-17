@@ -48,4 +48,5 @@ jobs:
           README_API_KEY:     ${{ secrets.README_API_KEY }}
           README_AUTHOR_ID:   ${{ secrets.README_AUTHOR_ID }}
           SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL:  ${{ secrets.TEAMS_WEBHOOK_URL }}
         run: node scripts/publish-changelog.js "${{ steps.month.outputs.value }}"

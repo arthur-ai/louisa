@@ -242,15 +242,16 @@ const entryUrl  = `https://docs.arthur.ai/changelog/${entrySlug}`;
 console.log(`\n✓ ${existing ? "Updated" : "Published"}: ${title}`);
 console.log(`  ${entryUrl}`);
 
-// ── Slack notification ────────────────────────────────────────────────────────
+// ── Notifications (Slack and/or Teams) ───────────────────────────────────────
 
+const products    = Object.keys(groups);
+const productList = products.map((p) => `• ${p}`).join("\n");
+
+// Slack
 const slackWebhook = process.env.SLACK_WEBHOOK_URL;
 if (!slackWebhook) {
   console.warn("SLACK_WEBHOOK_URL not set — skipping Slack notification");
 } else {
-  const products = Object.keys(groups);
-  const productList = products.map((p) => `• ${p}`).join("\n");
-
   const slackPayload = {
     blocks: [
       {
@@ -292,5 +293,59 @@ if (!slackWebhook) {
     console.error(`Slack notification failed: ${slackRes.status} — ${await slackRes.text()}`);
   } else {
     console.log("Slack notification sent.");
+  }
+}
+
+// Teams
+const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
+if (!teamsWebhook) {
+  console.warn("TEAMS_WEBHOOK_URL not set — skipping Teams notification");
+} else {
+  const teamsPayload = {
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type:    "AdaptiveCard",
+          version: "1.2",
+          body: [
+            {
+              type:   "TextBlock",
+              text:   `📋 ${title}`,
+              weight: "Bolder",
+              size:   "Large",
+            },
+            {
+              type: "TextBlock",
+              text: `The combined monthly changelog is live on docs.arthur.ai.\n\n**Products covered:**\n${productList}`,
+              wrap: true,
+            },
+            {
+              type:   "TextBlock",
+              text:   "_Posted by Louisa_",
+              isSubtle: true,
+              wrap:   true,
+            },
+          ],
+          actions: [
+            { type: "Action.OpenUrl", title: "View Changelog", url: entryUrl },
+          ],
+        },
+      },
+    ],
+  };
+
+  const teamsRes = await fetch(teamsWebhook, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(teamsPayload),
+  });
+
+  if (!teamsRes.ok) {
+    console.error(`Teams notification failed: ${teamsRes.status} — ${await teamsRes.text()}`);
+  } else {
+    console.log("Teams notification sent.");
   }
 }

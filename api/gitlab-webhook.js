@@ -7,7 +7,7 @@ import {
   getProjectUrl,
 } from "../lib/gitlab.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
-import { postReleaseToSlack } from "../lib/slack.js";
+import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
 export const config = { maxDuration: 60 };
@@ -172,13 +172,13 @@ export default async function handler(req, res) {
 
       await activeSpan(tracer, "slack.post_notification", {
         "openinference.span.kind": "TOOL",
-        "tool.name":               "slack.postReleaseToSlack",
-        "tool.description":        "Posts a release summary to the Slack #releases channel via Incoming Webhook",
+        "tool.name":               "notifications.postReleaseNotification",
+        "tool.description":        "Posts a release notification to configured channels (Slack and/or Teams) via Incoming Webhook",
         "tool.parameters":         JSON.stringify({ tag: "string", releaseUrl: "string", notes: "string" }),
         "input.value":             JSON.stringify({ tag, releaseUrl }),
         "input.mime_type":         "application/json",
       }, async (s) => {
-        await postReleaseToSlack(tag, releaseUrl, notes);
+        await postReleaseNotification(tag, releaseUrl, notes);
         s.setAttribute("output.value",     "notification sent");
         s.setAttribute("output.mime_type", "text/plain");
       });

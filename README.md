@@ -23,7 +23,7 @@ Webhook fires ──► Vercel serverless function
         ├─► Fetches merged pull requests (GitHub) or merge requests (GitLab)
         ├─► Calls Claude via the Anthropic SDK to generate release notes
         ├─► Creates a published Release with formatted notes
-        ├─► Posts a summary to Slack (optional)
+        ├─► Posts a summary to Slack and/or Teams (optional)
         │       └─► Logs release metadata to ./logs/ for monthly blog drafting
         └─► Sends full OpenInference traces to Arthur Engine (optional)
 
@@ -39,7 +39,7 @@ On the 28th of each month (GitHub Actions):
         ├─► Backfills release log from GitHub + GitLab APIs
         ├─► Calls Claude to synthesize combined changelog (Platform + Engine)
         ├─► Creates or updates entry on docs.arthur.ai/changelog via readme.io API
-        └─► Posts Slack notification with link to the published changelog
+        └─► Posts Slack and/or Teams notification with link to the published changelog
 ```
 
 Louisa handles multiple scenarios:
@@ -68,6 +68,7 @@ Louisa generates release notes that are:
 | Manual release → fill in notes | ✅ | — |
 | Commit & PR/MR analysis | ✅ | ✅ |
 | Slack notifications | ✅ | ✅ |
+| Teams notifications | ✅ | ✅ |
 | Arthur Engine tracing | ✅ | ✅ |
 | Webhook signature verification | Secret token | Secret token |
 
@@ -129,6 +130,7 @@ Instrumentation uses the official [`@arizeai/openinference-instrumentation-anthr
 
 **Optional:**
 - A [Slack](https://slack.com) workspace with an Incoming Webhook URL (for release notifications)
+- A [Microsoft Teams](https://teams.microsoft.com) channel with an Incoming Webhook URL (for release notifications — use Slack, Teams, or both)
 - An [Arthur Evals Engine](https://arthur.ai) account with a task configured (for AI observability)
 
 ---
@@ -164,6 +166,9 @@ GITLAB_PROJECT_ID=12345678
 
 # ── Slack (optional) ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
+
+# ── Microsoft Teams (optional) ──
+TEAMS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/xxx
 
 # ── readme.io (for changelog publishing) ──
 README_API_KEY=rdme_your_readme_api_key
@@ -203,6 +208,15 @@ openssl rand -hex 32
 3. Go to **Incoming Webhooks** in the sidebar and toggle it on
 4. Click **Add New Webhook to Workspace** and select your releases channel (e.g. #releases)
 5. Copy the webhook URL and use it as `SLACK_WEBHOOK_URL`
+
+**Microsoft Teams Incoming Webhook (optional):**
+1. Open the Teams channel where you want notifications (e.g. **Releases**)
+2. Click **···** (More options) → **Connectors** (classic connectors) **or** go to **Manage channel → Edit → Connectors**
+   > **Note:** Microsoft is migrating to Workflows-based webhooks. If Connectors are unavailable, go to the channel → **···** → **Workflows** → search for **"Post to a channel when a webhook request is received"** and follow the prompts.
+3. Find **Incoming Webhook**, click **Configure**, give it the name **Louisa**
+4. Copy the generated webhook URL and use it as `TEAMS_WEBHOOK_URL`
+
+You can configure Slack only, Teams only, or both simultaneously — Louisa posts to whichever are set.
 
 ### 3. Deploy to Vercel
 
@@ -280,10 +294,10 @@ louisa/
 | `lib/gitlab.js` | Compares tags, fetches commits, resolves merged MRs, creates GitLab releases |
 | `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
 | `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
-| `lib/slack.js` | Posts release summaries to Slack; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful post |
+| `lib/slack.js` | Posts release notifications to Slack and/or Teams via `postReleaseNotification`; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful dispatch |
 | `scripts/backfill-log.js` | Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
 | `scripts/draft-blog.js` | Reads monthly release log entries and calls Claude to draft the Arthur "What's New" blog post in Ashley's voice |
-| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, creates or updates the entry on readme.io, and posts a Slack notification with a link to the published changelog |
+| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, creates or updates the entry on readme.io, and posts a Slack and/or Teams notification with a link to the published changelog |
 
 ### Tracing architecture
 
@@ -297,9 +311,11 @@ The webhook handlers wrap each logical step in an `activeSpan()` call (CHAIN for
 
 ---
 
-## Slack Notifications
+## Notifications (Slack and/or Teams)
 
-When `SLACK_WEBHOOK_URL` is configured, Louisa automatically posts a summary to your Slack channel every time release notes are published — from either GitHub or GitLab. The Slack message includes:
+Louisa can post release summaries to **Slack**, **Microsoft Teams**, or both simultaneously. Configure either or both — each is independently optional.
+
+When a notification channel is configured, Louisa automatically posts a summary every time release notes are published — from either GitHub or GitLab. Each message includes:
 
 - The product name (auto-detected from the release notes)
 - The release tag name
@@ -308,13 +324,20 @@ When `SLACK_WEBHOOK_URL` is configured, Louisa automatically posts a summary to 
 - A warning if the release includes breaking changes
 - A **"View Full Release Notes"** button linking directly to the GitHub or GitLab release
 
-Slack notifications are optional. If `SLACK_WEBHOOK_URL` is not set, Louisa skips the notification silently and everything else works as normal.
+| Variable | Channel | Format |
+|----------|---------|--------|
+| `SLACK_WEBHOOK_URL` | Slack | Block Kit (header, sections, button) |
+| `TEAMS_WEBHOOK_URL` | Microsoft Teams | Adaptive Card v1.2 |
+
+If neither variable is set, Louisa skips notifications silently — everything else works as normal.
+
+On the 28th of each month, the same channels also receive a notification linking to the newly published combined changelog on docs.arthur.ai.
 
 ---
 
 ## Monthly Blog Post Drafting
 
-Louisa doubles as a blog-drafting assistant. After each successful Slack notification, she logs structured metadata for that release — tag, product, theme, key areas, breaking changes, and the full generated notes — to a monthly newline-delimited JSON file at `./logs/releases-{month}.json.lines`.
+Louisa doubles as a blog-drafting assistant. After each successful release notification (Slack, Teams, or both), she logs structured metadata for that release — tag, product, theme, key areas, breaking changes, and the full generated notes — to a monthly newline-delimited JSON file at `./logs/releases-{month}.json.lines`.
 
 On the 24th of each month, a GitHub Action reads the last 30 days of those log entries and calls Claude to draft Arthur's "What's New" monthly blog post in Ashley's voice. The draft lands in `output/blog-draft-{month}.md` and is uploaded as a GitHub Actions artifact, giving the team one week to review and polish before publishing.
 
@@ -342,7 +365,7 @@ You can also trigger it manually from the **Actions** tab with an optional month
 
 ## Monthly Changelog Publishing
 
-On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately and attributed to the configured author. Once published, Louisa posts a Slack notification to the releases channel with a direct link to the new entry. If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
+On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately and attributed to the configured author. Once published, Louisa posts a notification to any configured channels (Slack, Teams, or both) with a direct link to the new entry. If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
 
 ### Run it manually
 
@@ -360,7 +383,8 @@ node scripts/publish-changelog.js "March 2026"
 
 `.github/workflows/publish-changelog.yml` triggers automatically on the 28th of each month. It runs the backfill step first, then publishes.
 
-**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`, `README_AUTHOR_ID`, `SLACK_WEBHOOK_URL`, `REPO_OWNER`, `REPO_NAME`
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`, `README_AUTHOR_ID`, `REPO_OWNER`, `REPO_NAME`
+**Optional secrets:** `SLACK_WEBHOOK_URL`, `TEAMS_WEBHOOK_URL` (at least one recommended)
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
@@ -438,6 +462,9 @@ Louisa checks for existing releases before creating one and skips if notes are a
 **Slack notification not posting**
 Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still active in your Slack app settings. Check Vercel logs for `Louisa: Slack post failed` messages.
 
+**Teams notification not posting**
+Verify `TEAMS_WEBHOOK_URL` is set in Vercel. If using classic Connectors, check that the connector hasn't expired or been removed from the channel. If using Workflows-based webhooks, verify the flow is enabled. Check Vercel logs for `Louisa: Teams post failed` messages.
+
 **No traces appearing in Arthur Engine**
 - Verify `ARTHUR_BASE_URL` and `ARTHUR_API_KEY` are set in Vercel and match your Arthur instance
 - Check Vercel logs for `Louisa: Arthur trace failed` or `Louisa: trace flush error` messages
@@ -453,7 +480,7 @@ Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still ac
 - **Observability:** OpenTelemetry SDK + [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) for automatic LLM span instrumentation, OTLP/proto export to [Arthur Evals Engine](https://arthur.ai)
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
 - **Auth:** Secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
-- **Notifications:** Slack Incoming Webhooks
+- **Notifications:** Slack Incoming Webhooks, Microsoft Teams Adaptive Cards (Incoming Webhooks)
 
 ---
 
