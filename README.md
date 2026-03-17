@@ -26,6 +26,20 @@ Webhook fires ──► Vercel serverless function
         ├─► Posts a summary to Slack (optional)
         │       └─► Logs release metadata to ./logs/ for monthly blog drafting
         └─► Sends full OpenInference traces to Arthur Engine (optional)
+
+─────────────────────────────────────────────────────────────────
+
+On the 24th of each month (GitHub Actions):
+        │
+        ├─► Backfills release log from GitHub + GitLab APIs
+        └─► Calls Claude to draft "What's New" blog post → artifact for team review
+
+On the 28th of each month (GitHub Actions):
+        │
+        ├─► Backfills release log from GitHub + GitLab APIs
+        ├─► Calls Claude to synthesize combined changelog (Platform + Engine)
+        ├─► Creates or updates entry on docs.arthur.ai/changelog via readme.io API
+        └─► Posts Slack notification with link to the published changelog
 ```
 
 Louisa handles multiple scenarios:
@@ -269,7 +283,7 @@ louisa/
 | `lib/slack.js` | Posts release summaries to Slack; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful post |
 | `scripts/backfill-log.js` | Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
 | `scripts/draft-blog.js` | Reads monthly release log entries and calls Claude to draft the Arthur "What's New" blog post in Ashley's voice |
-| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, then creates or updates the entry on readme.io |
+| `scripts/publish-changelog.js` | Reads monthly release logs, calls Claude to synthesize a structured changelog organized by Arthur Platform and Arthur Engine & Toolkit, creates or updates the entry on readme.io, and posts a Slack notification with a link to the published changelog |
 
 ### Tracing architecture
 
@@ -328,7 +342,7 @@ You can also trigger it manually from the **Actions** tab with an optional month
 
 ## Monthly Changelog Publishing
 
-On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately (`hidden: false`). If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
+On the 28th of each month, Louisa automatically combines all release entries from Arthur Platform (GitLab) and Arthur Engine & Toolkit (GitHub) and publishes a single structured changelog entry to [docs.arthur.ai/changelog](https://docs.arthur.ai/changelog) via the readme.io API. The entry is published immediately and attributed to the configured author. Once published, Louisa posts a Slack notification to the releases channel with a direct link to the new entry. If any late-month releases fall on the 29th–31st, re-trigger the workflow manually to update the entry in place.
 
 ### Run it manually
 
@@ -346,7 +360,7 @@ node scripts/publish-changelog.js "March 2026"
 
 `.github/workflows/publish-changelog.yml` triggers automatically on the 28th of each month. It runs the backfill step first, then publishes.
 
-**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`, `README_AUTHOR_ID`, `REPO_OWNER`, `REPO_NAME`
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`, `README_AUTHOR_ID`, `SLACK_WEBHOOK_URL`, `REPO_OWNER`, `REPO_NAME`
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
