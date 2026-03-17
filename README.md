@@ -153,6 +153,7 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
 
 # ── readme.io (for changelog publishing) ──
 README_API_KEY=rdme_your_readme_api_key
+README_AUTHOR_ID=your_readme_user_id
 
 # ── Arthur Evals Engine (optional) ──
 ARTHUR_BASE_URL=https://your-engine.arthur.ai
@@ -319,8 +320,7 @@ node scripts/draft-blog.js "March 2026" --days 30
 
 `.github/workflows/draft-blog.yml` triggers automatically on the 24th of each month. It runs the backfill step first (to catch any releases that happened since the last log write), then drafts the post.
 
-**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`
-**Required secrets:** also add `REPO_OWNER`, `REPO_NAME` (stored as secrets to keep org/repo names masked in public workflow logs)
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `REPO_OWNER`, `REPO_NAME`
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
@@ -346,12 +346,11 @@ node scripts/publish-changelog.js "March 2026"
 
 `.github/workflows/publish-changelog.yml` triggers automatically on the 28th of each month. It runs the backfill step first, then publishes.
 
-**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`
-**Required secrets:** also add `REPO_OWNER`, `REPO_NAME` (stored as secrets to keep org/repo names masked in public workflow logs)
+**Required secrets:** `ANTHROPIC_API_KEY`, `GITLAB_TOKEN`, `GITLAB_PROJECT_ID`, `README_API_KEY`, `README_AUTHOR_ID`, `REPO_OWNER`, `REPO_NAME`
 
 You can also trigger it manually from the **Actions** tab with an optional month override (e.g. `"February 2026"`).
 
-> **Note:** The readme.io changelog API (`dash.readme.com/api/v1/changelogs`) is available for projects on the classic ReadMe experience. If you see a 404, your project may be using ReadMe Refactored — check with your readme.io account settings.
+> **`README_AUTHOR_ID`** is your readme.io user ID — changelog entries are attributed to this account. Find it by checking an existing entry you created via the readme.io dashboard.
 
 ---
 
