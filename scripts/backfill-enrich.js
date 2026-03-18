@@ -31,7 +31,7 @@ import {
   getPRComments,
   updatePR,
 } from "../lib/github.js";
-import { enrichPRDescription, isAlreadyEnriched } from "../lib/enrich.js";
+import { enrichPRDescription, isAlreadyEnriched, shouldSkipEnrichment } from "../lib/enrich.js";
 
 // ── Arg parsing ───────────────────────────────────────────────────────────────
 
@@ -136,12 +136,22 @@ console.log(`\nFetching PRs merged since ${fmt(since)}...`);
 const allPRs = await getMergedPRsSince(since);
 console.log(`Found ${allPRs.length} merged PR(s)`);
 
-// Separate already-enriched from pending
-const pending   = allPRs.filter((pr) => !isAlreadyEnriched(pr.body));
-const enriched  = allPRs.filter((pr) =>  isAlreadyEnriched(pr.body));
+// Separate PRs into buckets: already enriched, bot/automated, and pending
+const enriched  = allPRs.filter((pr) => isAlreadyEnriched(pr.body));
+const botPRs    = allPRs.filter((pr) => !isAlreadyEnriched(pr.body) && shouldSkipEnrichment({
+  title:          pr.title,
+  authorUsername: pr.user?.login ?? "",
+  authorType:     pr.user?.type  ?? "",
+}).skip);
+const pending   = allPRs.filter((pr) => !isAlreadyEnriched(pr.body) && !shouldSkipEnrichment({
+  title:          pr.title,
+  authorUsername: pr.user?.login ?? "",
+  authorType:     pr.user?.type  ?? "",
+}).skip);
 const toProcess = pending.slice(0, limit);
 
 console.log(`  Already enriched : ${enriched.length}`);
+console.log(`  Skipped (bots)   : ${botPRs.length}`);
 console.log(`  Pending          : ${pending.length}`);
 if (pending.length > toProcess.length) {
   console.log(`  Processing       : ${toProcess.length} (limited by --limit ${limit})`);

@@ -11,7 +11,7 @@ import {
   updateMR,
 } from "../lib/gitlab.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
-import { enrichPRDescription, isAlreadyEnriched } from "../lib/enrich.js";
+import { enrichPRDescription, isAlreadyEnriched, shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -46,14 +46,28 @@ export default async function handler(req, res) {
       return res.status(200).json({ skipped: true, reason: `mr action=${attrs?.action}` });
     }
 
+    const originalTitle = attrs?.title || "";
+    const originalBody  = attrs?.description || "";
+
+    // Skip bot/automated MRs — only enrich work by real developers
+    const mrAuthor = payload.user || {};
+    const { skip: skipBot, reason: botReason } = shouldSkipEnrichment({
+      title:          originalTitle,
+      authorUsername: mrAuthor.username ?? "",
+      // GitLab marks bot users with user_type === "project_bot" or "service_account"
+      authorType:     mrAuthor.bot ? "Bot" : (mrAuthor.user_type ?? ""),
+    });
+    if (skipBot) {
+      console.log(`Louisa: skipping MR !${mrIid} — ${botReason}`);
+      return res.status(200).json({ skipped: true, reason: botReason });
+    }
+
     // Idempotency: skip if Louisa has already enriched this MR
-    if (isAlreadyEnriched(attrs?.description)) {
+    if (isAlreadyEnriched(originalBody)) {
       console.log(`Louisa: MR !${mrIid} already enriched, skipping`);
       return res.status(200).json({ skipped: true, reason: "already enriched" });
     }
 
-    const originalTitle = attrs?.title || "";
-    const originalBody  = attrs?.description || "";
     console.log(`Louisa: enriching merged MR !${mrIid} — "${originalTitle}"`);
 
     try {

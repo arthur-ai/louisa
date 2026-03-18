@@ -12,7 +12,7 @@ import {
   updatePR,
 } from "../lib/github.js";
 import { generateReleaseNotes } from "../lib/claude.js";
-import { enrichPRDescription, isAlreadyEnriched } from "../lib/enrich.js";
+import { enrichPRDescription, isAlreadyEnriched, shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -304,6 +304,17 @@ export default async function handler(req, res) {
     // Skip draft PRs — they signal work-in-progress, not shipped changes
     if (pr.draft) {
       return res.status(200).json({ skipped: true, reason: "draft PR" });
+    }
+
+    // Skip bot/automated PRs — only enrich work by real developers
+    const { skip: skipBot, reason: botReason } = shouldSkipEnrichment({
+      title:          pr.title,
+      authorUsername: pr.user?.login ?? "",
+      authorType:     pr.user?.type ?? "",
+    });
+    if (skipBot) {
+      console.log(`Louisa: skipping PR #${prNumber} — ${botReason}`);
+      return res.status(200).json({ skipped: true, reason: botReason });
     }
 
     // Idempotency: skip if Louisa has already enriched this PR
