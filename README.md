@@ -4,6 +4,8 @@
 
 Louisa is a lightweight serverless bot that listens for new tags and releases on your GitHub or GitLab repos, analyzes the commits and pull/merge requests since the last release, and uses Claude to generate polished, user-facing release notes — published directly to your Releases page.
 
+She also enriches every merged PR and MR in place — rewriting vague titles and sparse descriptions into a consistent, structured format so that the context developers already captured gets properly surfaced when it's time to generate notes and content.
+
 No manual steps. No copy-pasting changelogs. Just push a tag and Louisa handles the rest.
 
 Works with **GitHub**, **GitLab**, or **both simultaneously**. Use whichever fits your workflow.
@@ -13,6 +15,19 @@ Works with **GitHub**, **GitLab**, or **both simultaneously**. Use whichever fit
 ## How It Works
 
 ```
+PR/MR merged on GitHub or GitLab
+        │
+        ▼
+Webhook fires ──► Vercel serverless function
+        │
+        ├─► Verifies webhook signature
+        ├─► Fetches PR/MR title, description, commits, changed files, and review comments
+        ├─► Calls Claude to rewrite the description into a structured schema
+        │       (Summary / Problem / Solution / User Impact / Changed Areas / Type / Breaking Changes)
+        └─► Writes enriched title + description back to the PR/MR on GitHub or GitLab
+
+─────────────────────────────────────────────────────────────────
+
 Tag pushed to GitHub or GitLab
         │
         ▼
@@ -20,7 +35,7 @@ Webhook fires ──► Vercel serverless function
         │
         ├─► Verifies webhook signature
         ├─► Fetches commits between this tag and the previous release
-        ├─► Fetches merged pull requests (GitHub) or merge requests (GitLab)
+        ├─► Fetches merged PRs/MRs — now with enriched, structured descriptions
         ├─► Calls Claude via the Anthropic SDK to generate release notes
         ├─► Creates a published Release with formatted notes
         ├─► Posts a summary to Slack and/or Teams (optional)
@@ -48,12 +63,33 @@ On the 28th of each month — Changelog Publishing:
 
 Louisa handles multiple scenarios:
 
+- **PR/MR merged (GitHub or GitLab)** — Louisa enriches the PR/MR description in place with structured context, improving the signal available for release notes and blog content downstream.
 - **Tag push (GitHub or GitLab)** — Automatically creates a published release with generated notes. No one needs to touch the Releases page manually.
 - **Manual release (GitHub)** — If someone creates a release by hand, Louisa detects it and fills in the release notes if they're empty.
 
 ---
 
 ## What You Get
+
+### Core: PR/MR context enrichment
+
+When a PR or MR is merged, Louisa automatically rewrites its title and description into a consistent, structured format — pulling from the original description, commit messages, changed files, and review comments to capture what developers already documented but rarely write up cleanly.
+
+Each enriched description follows this schema:
+
+| Field | What it captures |
+|-------|-----------------|
+| **Summary** | What was built and why, in plain English |
+| **Problem** | The specific friction or gap being addressed |
+| **Solution** | What was implemented |
+| **User Impact** | Who benefits and how |
+| **Changed Areas** | Files, services, and systems touched |
+| **Type** | Feature / Bug Fix / Dependency / Internal / Breaking |
+| **Breaking Changes** | Explicit flag — never omitted, never buried |
+
+The enriched content is written back to the PR/MR on GitHub or GitLab. An invisible marker prevents re-enrichment if the webhook fires more than once.
+
+This gives every downstream step — release notes, blog drafts, changelogs — substantially richer signal without requiring developers to change how they write PRs.
 
 ### Core: Automatic release notes
 
@@ -80,6 +116,7 @@ These pipelines are **entirely optional** — they have no effect on Louisa's co
 
 | Feature | GitHub | GitLab |
 |---------|--------|--------|
+| PR/MR enrichment on merge | ✅ | ✅ |
 | Tag push → auto-create release | ✅ | ✅ |
 | Manual release → fill in notes | ✅ | — |
 | Commit & PR/MR analysis | ✅ | ✅ |
@@ -204,6 +241,7 @@ openssl rand -hex 32
 
 **GitHub Token permissions** (fine-grained token):
 - **Contents** — Read and write
+- **Pull requests** — Read and write (required for PR enrichment — reading commits/files/comments, writing enriched descriptions back)
 - Scoped to the repo you want release notes for
 
 **GitLab Token permissions:**
@@ -256,6 +294,7 @@ On your GitHub repo, go to **Settings → Webhooks → Add webhook**:
 4. **Events:** Select "Let me select individual events" and check:
    - **Branch or tag creation** (triggers release creation on tag push)
    - **Releases** (triggers note generation on manual releases)
+   - **Pull requests** (triggers PR enrichment on merge)
 
 **GitLab webhook:**
 
@@ -275,13 +314,15 @@ louisa/
 │   └── gitlab-webhook.js     # GitLab webhook handler
 ├── lib/
 │   ├── otel.js                # OpenTelemetry + OpenInference tracing setup
-│   ├── github.js              # GitHub API client (commits, PRs, releases)
-│   ├── gitlab.js              # GitLab API client (commits, MRs, releases)
+│   ├── github.js              # GitHub API client (commits, PRs, releases, enrichment)
+│   ├── gitlab.js              # GitLab API client (commits, MRs, releases, enrichment)
+│   ├── enrich.js              # PR/MR context enrichment — Claude prompt + idempotency guard
 │   ├── claude.js              # Anthropic SDK client for GitHub release notes
 │   ├── claude-platform.js     # Anthropic SDK client for GitLab release notes
 │   ├── slack.js               # Slack Incoming Webhook client + monthly release logger
 │   └── crypto.js              # GitHub webhook signature verification
 ├── scripts/
+│   ├── backfill-enrich.js     # Retroactively enrich PRs merged since the last release
 │   ├── backfill-log.js        # Seed monthly log from existing GitHub/GitLab releases
 │   ├── draft-blog.js          # [optional] Generate monthly blog post from release logs
 │   └── publish-changelog.js   # [optional] Publish combined monthly changelog to readme.io
@@ -302,15 +343,17 @@ louisa/
 
 | Component | Purpose |
 |-----------|---------|
-| `api/webhook.js` | Receives GitHub webhooks, routes tag and release events, orchestrates the GitHub pipeline |
-| `api/gitlab-webhook.js` | Receives GitLab webhooks, handles tag push events, orchestrates the GitLab pipeline |
+| `api/webhook.js` | Receives GitHub webhooks, routes tag, release, and pull_request merge events, orchestrates the GitHub pipeline |
+| `api/gitlab-webhook.js` | Receives GitLab webhooks, handles tag push and merge_request merge events, orchestrates the GitLab pipeline |
+| `lib/enrich.js` | Core enrichment logic — builds the Claude prompt from full PR/MR context, enforces the structured schema, guards against re-enrichment with an idempotency marker |
 | `lib/otel.js` | Lazy-initialises the OpenTelemetry provider, patches the Anthropic SDK for auto-instrumentation, exports `getTracer`, `forceFlush`, and `activeSpan` |
 | `lib/crypto.js` | Verifies GitHub webhook authenticity using HMAC-SHA256 with timing-safe comparison |
-| `lib/github.js` | Compares tags, fetches commits, resolves merged PRs, creates and updates GitHub releases |
-| `lib/gitlab.js` | Compares tags, fetches commits, resolves merged MRs, creates GitLab releases |
+| `lib/github.js` | Compares tags, fetches commits/files/comments, resolves merged PRs, creates and updates GitHub releases, writes enriched PR descriptions |
+| `lib/gitlab.js` | Compares tags, fetches commits/changes/notes, resolves merged MRs, creates GitLab releases, writes enriched MR descriptions |
 | `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
 | `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
 | `lib/slack.js` | Posts release notifications to Slack and/or Teams via `postReleaseNotification`; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful dispatch |
+| `scripts/backfill-enrich.js` | Retroactively enriches all PRs merged since the last release — dry-run by default, `--write` to apply |
 | `scripts/backfill-log.js` | *(optional pipeline)* Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
 | `scripts/draft-blog.js` | *(optional pipeline)* Reads monthly release log entries and calls Claude to draft a "What's New" blog post |
 | `scripts/publish-changelog.js` | *(optional pipeline)* Reads monthly release logs, calls Claude to synthesize a combined changelog, creates or updates the entry on readme.io, and posts a Slack/Teams notification |
@@ -348,6 +391,55 @@ When a notification channel is configured, Louisa automatically posts a summary 
 If neither variable is set, Louisa skips notifications silently — everything else works as normal.
 
 On the 28th of each month, the same channels also receive a notification linking to the newly published combined changelog on docs.arthur.ai.
+
+---
+
+## PR/MR Context Enrichment
+
+Every time a PR (GitHub) or MR (GitLab) is merged, Louisa fetches its full context — original title, description, commits, changed files, and review comments — and rewrites the description using a structured schema. The enriched content is written back to the PR/MR automatically. No developer action required.
+
+### Why this matters
+
+Developers write PR descriptions under time pressure. Titles like `UP-3688 timezone select` or `NO_REF - Refactored deprecated definitions` carry almost no signal for release notes or content generation. Louisa uses what the developer *did* — the actual code changes, commit messages, and any review discussion — to reconstruct what they *meant*, and writes it back in a form the entire downstream pipeline can use.
+
+### What gets enriched
+
+| Before | After |
+|--------|-------|
+| `Up 3688 timezone select` | `Add timezone and time format preferences to user settings` |
+| `NO_REF - Refactored deprecated definitions` | `Fix Pydantic deprecation warnings in schema definitions` |
+| `feat: new create experiment modal` | `Add guided multi-step experiment creation modal` |
+
+Dependency bumps and internal refactors are typed correctly (`Dependency` / `Internal`) so Louisa can weight them appropriately when generating release notes — they don't get treated as user-facing features.
+
+### Backfilling historical PRs
+
+To enrich PRs that were merged before this feature was enabled, use the backfill script:
+
+```bash
+set -a && source .env.local && set +a
+
+# Preview what would be enriched (dry-run, no writes)
+node scripts/backfill-enrich.js
+
+# Apply enrichment to all unprocessed PRs since the last release
+node scripts/backfill-enrich.js --write
+
+# Limit to N PRs (useful for a first test run)
+node scripts/backfill-enrich.js --write --limit 5
+
+# Enrich from a specific date instead of the last release
+node scripts/backfill-enrich.js --write --since 2026-02-01T00:00:00Z
+
+# Target a different repo
+node scripts/backfill-enrich.js --write --owner my-org --repo my-repo
+```
+
+The script skips PRs that are already enriched (idempotent — safe to re-run).
+
+### Webhook requirement
+
+The GitHub webhook on your target repo must have the **Pull requests** event enabled. GitLab webhook trigger events don't need any changes — merge request events are already included in the default trigger set.
 
 ---
 
@@ -488,6 +580,12 @@ Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still ac
 
 **Teams notification not posting**
 Verify `TEAMS_WEBHOOK_URL` is set in Vercel. If using classic Connectors, check that the connector hasn't expired or been removed from the channel. If using Workflows-based webhooks, verify the flow is enabled. Check Vercel logs for `Louisa: Teams post failed` messages.
+
+**PR/MR descriptions aren't being enriched**
+- Confirm the **Pull requests** event is checked on the GitHub webhook (Settings → Webhooks → Edit → individual events). GitLab requires no changes.
+- Confirm the GitHub token has **Pull requests: Read and write** permission (fine-grained PAT).
+- Check Vercel function logs for `Louisa: enrich` messages — the enrichment step logs its outcome.
+- If a PR was already enriched, the idempotency marker (`<!-- enriched-by-louisa -->`) prevents re-processing. Remove it from the description to force a re-run.
 
 **No traces appearing in Arthur Engine**
 - Verify `ARTHUR_BASE_URL` and `ARTHUR_API_KEY` are set in Vercel and match your Arthur instance
