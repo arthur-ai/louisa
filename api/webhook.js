@@ -6,8 +6,13 @@ import {
   getReleaseByTag,
   createRelease,
   updateReleaseBody,
+  getPRCommits,
+  getPRFiles,
+  getPRComments,
+  updatePR,
 } from "../lib/github.js";
 import { generateReleaseNotes } from "../lib/claude.js";
+import { enrichPRDescription, isAlreadyEnriched } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -280,6 +285,109 @@ export default async function handler(req, res) {
       return res.status(200).json(result);
     } catch (err) {
       console.error("Louisa: error updating release", err);
+      await forceFlush();
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // ─── PR merged: enrich title and description ──────────────────────────────
+  if (
+    event === "pull_request" &&
+    payload.action === "closed" &&
+    payload.pull_request?.merged === true
+  ) {
+    const pr       = payload.pull_request;
+    const owner    = payload.repository.owner.login;
+    const repo     = payload.repository.name;
+    const prNumber = pr.number;
+
+    // Skip draft PRs — they signal work-in-progress, not shipped changes
+    if (pr.draft) {
+      return res.status(200).json({ skipped: true, reason: "draft PR" });
+    }
+
+    // Idempotency: skip if Louisa has already enriched this PR
+    if (isAlreadyEnriched(pr.body)) {
+      console.log(`Louisa: PR #${prNumber} already enriched, skipping`);
+      return res.status(200).json({ skipped: true, reason: "already enriched" });
+    }
+
+    console.log(`Louisa: enriching merged PR #${prNumber} — "${pr.title}"`);
+
+    try {
+      const result = await activeSpan(tracer, "louisa.github.enrich_pr", {
+        "openinference.span.kind": "CHAIN",
+        "agent.name":              "Louisa",
+        "input.value":             JSON.stringify({ event: "pr_merged", prNumber, repository: `${owner}/${repo}` }),
+        "input.mime_type":         "application/json",
+        "pr_number":               String(prNumber),
+        "repository":              `${owner}/${repo}`,
+      }, async (rootSpan) => {
+
+        const [commits, files, comments] = await activeSpan(tracer, "github.get_pr_context", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "github.getPRContext",
+          "tool.description":        "Fetches commits, changed files, and review comments from the merged PR",
+          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", prNumber: "integer" }),
+          "input.value":             JSON.stringify({ owner, repo, prNumber }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          const [c, f, co] = await Promise.all([
+            getPRCommits(owner, repo, prNumber),
+            getPRFiles(owner, repo, prNumber),
+            getPRComments(owner, repo, prNumber),
+          ]);
+          s.setAttribute("output.value",     JSON.stringify({ commits: c.length, files: f.length, comments: co.length }));
+          s.setAttribute("output.mime_type", "application/json");
+          return [c, f, co];
+        });
+
+        console.log(`Louisa: PR #${prNumber} context — ${commits.length} commits, ${files.length} files, ${comments.length} comments`);
+
+        const { title: enrichedTitle, body: enrichedBody } = await activeSpan(tracer, "louisa.enrich_pr_description", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "louisa.enrichPRDescription",
+          "tool.description":        "Calls Claude to rewrite the PR title and description into a structured format optimised for release notes and marketing content",
+          "tool.parameters":         JSON.stringify({ platform: "string", originalTitle: "string", originalBody: "string", commits: "array", files: "array", comments: "array" }),
+          "input.value":             JSON.stringify({ prNumber, originalTitle: pr.title }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          const r = await enrichPRDescription({
+            platform:      "github",
+            originalTitle: pr.title,
+            originalBody:  pr.body || "",
+            commits,
+            files,
+            comments,
+          });
+          s.setAttribute("output.value",     r.title);
+          s.setAttribute("output.mime_type", "text/plain");
+          return r;
+        });
+
+        await activeSpan(tracer, "github.update_pr", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "github.updatePR",
+          "tool.description":        "Writes the enriched title and structured description back to the merged PR",
+          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", prNumber: "integer", title: "string", body: "string" }),
+          "input.value":             JSON.stringify({ owner, repo, prNumber, enrichedTitle }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          await updatePR(owner, repo, prNumber, enrichedTitle, enrichedBody);
+          s.setAttribute("output.value",     "updated");
+          s.setAttribute("output.mime_type", "text/plain");
+        });
+
+        rootSpan.setAttribute("output.value",     `PR #${prNumber} enriched`);
+        rootSpan.setAttribute("output.mime_type", "text/plain");
+        console.log(`Louisa: PR #${prNumber} enriched — "${enrichedTitle}"`);
+        return { ok: true, prNumber, action: "enriched", enrichedTitle };
+      });
+
+      await forceFlush();
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error(`Louisa: error enriching PR #${prNumber}`, err);
       await forceFlush();
       return res.status(500).json({ error: err.message });
     }
