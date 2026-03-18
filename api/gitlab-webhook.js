@@ -5,8 +5,13 @@ import {
   getReleaseByTag,
   createRelease,
   getProjectUrl,
+  getMRCommits,
+  getMRChanges,
+  getMRNotes,
+  updateMR,
 } from "../lib/gitlab.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
+import { enrichPRDescription, isAlreadyEnriched } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -27,7 +32,110 @@ export default async function handler(req, res) {
   const payload   = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
   const eventType = payload.object_kind || payload.event_name;
 
-  // Only handle tag push events
+  // Initialise the OTel provider (+ Anthropic auto-instrumentation) once per container.
+  const tracer = getTracer();
+
+  // ─── MR merged: enrich title and description ────────────────────────────────
+  if (eventType === "merge_request") {
+    const attrs    = payload.object_attributes;
+    const mrIid    = attrs?.iid;
+    const projectId = attrs?.target_project_id || payload.project?.id || process.env.GITLAB_PROJECT_ID;
+
+    // Only act on the "merge" action (not open, update, close, etc.)
+    if (attrs?.action !== "merge") {
+      return res.status(200).json({ skipped: true, reason: `mr action=${attrs?.action}` });
+    }
+
+    // Idempotency: skip if Louisa has already enriched this MR
+    if (isAlreadyEnriched(attrs?.description)) {
+      console.log(`Louisa: MR !${mrIid} already enriched, skipping`);
+      return res.status(200).json({ skipped: true, reason: "already enriched" });
+    }
+
+    const originalTitle = attrs?.title || "";
+    const originalBody  = attrs?.description || "";
+    console.log(`Louisa: enriching merged MR !${mrIid} — "${originalTitle}"`);
+
+    try {
+      const result = await activeSpan(tracer, "louisa.gitlab.enrich_mr", {
+        "openinference.span.kind": "CHAIN",
+        "agent.name":              "Louisa",
+        "input.value":             JSON.stringify({ event: "mr_merged", mrIid, projectId: String(projectId) }),
+        "input.mime_type":         "application/json",
+        "mr_iid":                  String(mrIid),
+        "project_id":              String(projectId),
+      }, async (rootSpan) => {
+
+        const [commits, files, comments] = await activeSpan(tracer, "gitlab.get_mr_context", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "gitlab.getMRContext",
+          "tool.description":        "Fetches commits, changed files, and discussion notes from the merged MR",
+          "tool.parameters":         JSON.stringify({ projectId: "string|number", mrIid: "integer" }),
+          "input.value":             JSON.stringify({ projectId, mrIid }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          const [c, f, co] = await Promise.all([
+            getMRCommits(projectId, mrIid),
+            getMRChanges(projectId, mrIid),
+            getMRNotes(projectId, mrIid),
+          ]);
+          s.setAttribute("output.value",     JSON.stringify({ commits: c.length, files: f.length, comments: co.length }));
+          s.setAttribute("output.mime_type", "application/json");
+          return [c, f, co];
+        });
+
+        console.log(`Louisa: MR !${mrIid} context — ${commits.length} commits, ${files.length} files, ${comments.length} comments`);
+
+        const { title: enrichedTitle, body: enrichedBody } = await activeSpan(tracer, "louisa.enrich_mr_description", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "louisa.enrichMRDescription",
+          "tool.description":        "Calls Claude to rewrite the MR title and description into a structured format optimised for release notes and marketing content",
+          "tool.parameters":         JSON.stringify({ platform: "string", originalTitle: "string", originalBody: "string", commits: "array", files: "array", comments: "array" }),
+          "input.value":             JSON.stringify({ mrIid, originalTitle }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          const r = await enrichPRDescription({
+            platform:      "gitlab",
+            originalTitle,
+            originalBody,
+            commits,
+            files,
+            comments,
+          });
+          s.setAttribute("output.value",     r.title);
+          s.setAttribute("output.mime_type", "text/plain");
+          return r;
+        });
+
+        await activeSpan(tracer, "gitlab.update_mr", {
+          "openinference.span.kind": "TOOL",
+          "tool.name":               "gitlab.updateMR",
+          "tool.description":        "Writes the enriched title and structured description back to the merged MR",
+          "tool.parameters":         JSON.stringify({ projectId: "string|number", mrIid: "integer", title: "string", description: "string" }),
+          "input.value":             JSON.stringify({ projectId, mrIid, enrichedTitle }),
+          "input.mime_type":         "application/json",
+        }, async (s) => {
+          await updateMR(projectId, mrIid, enrichedTitle, enrichedBody);
+          s.setAttribute("output.value",     "updated");
+          s.setAttribute("output.mime_type", "text/plain");
+        });
+
+        rootSpan.setAttribute("output.value",     `MR !${mrIid} enriched`);
+        rootSpan.setAttribute("output.mime_type", "text/plain");
+        console.log(`Louisa: MR !${mrIid} enriched — "${enrichedTitle}"`);
+        return { ok: true, mrIid, action: "enriched", enrichedTitle };
+      });
+
+      await forceFlush();
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error(`Louisa: error enriching MR !${mrIid}`, err);
+      await forceFlush();
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  // Only handle tag push events for release note generation
   if (eventType !== "tag_push" && eventType !== "push") {
     return res.status(200).json({ skipped: true, reason: `event=${eventType}` });
   }
@@ -54,9 +162,6 @@ export default async function handler(req, res) {
     console.log(`Louisa: skipping non-production tag ${tag}`);
     return res.status(200).json({ skipped: true, reason: "non-production tag" });
   }
-
-  // Initialise the OTel provider (+ Anthropic auto-instrumentation) once per container.
-  const tracer = getTracer();
 
   try {
     const result = await activeSpan(tracer, "louisa.gitlab.release", {
