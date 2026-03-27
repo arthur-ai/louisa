@@ -47,9 +47,9 @@ export default async function handler(req, res) {
 
     console.log(`Louisa: new tag detected — ${tag}`);
 
-    if (tag.includes("-dev")) {
-      console.log(`Louisa: skipping dev tag ${tag}`);
-      return res.status(200).json({ skipped: true, reason: "dev tag" });
+    if (tag.includes("-dev") || tag.startsWith("sdk-")) {
+      console.log(`Louisa: skipping non-primary tag ${tag}`);
+      return res.status(200).json({ skipped: true, reason: "non-primary tag" });
     }
 
     try {
