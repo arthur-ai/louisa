@@ -152,15 +152,7 @@ async function fetchGitHubReleases() {
 
 // ── GitLab ────────────────────────────────────────────────────────────────────
 
-async function fetchGitLabReleases() {
-  const token     = process.env.GITLAB_TOKEN;
-  const projectId = process.env.GITLAB_PROJECT_ID;
-
-  if (!token || !projectId) {
-    console.warn("GITLAB_TOKEN or GITLAB_PROJECT_ID not set — skipping GitLab releases\n");
-    return [];
-  }
-
+async function fetchGitLabReleasesForProject(token, projectId) {
   const headers = { "PRIVATE-TOKEN": token };
   const results = [];
   let page = 1;
@@ -171,7 +163,7 @@ async function fetchGitLabReleases() {
       { headers }
     );
     if (!res.ok) {
-      console.error(`GitLab releases API error: ${res.status} ${await res.text()}`);
+      console.error(`GitLab releases API error (project ${projectId}): ${res.status} ${await res.text()}`);
       break;
     }
     const batch = await res.json();
@@ -199,6 +191,26 @@ async function fetchGitLabReleases() {
   }
 
   return results;
+}
+
+async function fetchGitLabReleases() {
+  const token = process.env.GITLAB_TOKEN;
+
+  const projectIds = [
+    process.env.GITLAB_PROJECT_ID,
+    process.env.GITLAB_SCOPE_PROJECT_ID,
+  ].filter(Boolean);
+
+  if (!token || projectIds.length === 0) {
+    console.warn("GITLAB_TOKEN or GITLAB_PROJECT_ID not set — skipping GitLab releases\n");
+    return [];
+  }
+
+  const all = await Promise.all(
+    projectIds.map((id) => fetchGitLabReleasesForProject(token, id))
+  );
+
+  return all.flat();
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────

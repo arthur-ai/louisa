@@ -251,6 +251,8 @@ const productList = products.map((p) => `• ${p}`).join("\n");
 const slackWebhook = process.env.SLACK_WEBHOOK_URL;
 if (!slackWebhook) {
   console.warn("SLACK_WEBHOOK_URL not set — skipping Slack notification");
+} else if (!URL.canParse(slackWebhook)) {
+  console.warn("SLACK_WEBHOOK_URL is not a valid URL — skipping Slack notification");
 } else {
   const slackPayload = {
     blocks: [
@@ -300,6 +302,8 @@ if (!slackWebhook) {
 const teamsWebhook = process.env.TEAMS_WEBHOOK_URL;
 if (!teamsWebhook) {
   console.warn("TEAMS_WEBHOOK_URL not set — skipping Teams notification");
+} else if (!URL.canParse(teamsWebhook)) {
+  console.warn("TEAMS_WEBHOOK_URL is not a valid URL — skipping Teams notification");
 } else {
   const teamsPayload = {
     type: "message",
