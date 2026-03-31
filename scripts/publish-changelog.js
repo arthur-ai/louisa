@@ -130,7 +130,8 @@ RULES:
 - Bug fixes go in their own ### subsection at the bottom of each product
 - No marketing language, no internal PR/commit references, no narrative prose
 - If only one product has releases this month, omit the other section
-- Keep it concise — this is a reference document, not a blog post`;
+- Keep it concise — this is a reference document, not a blog post
+- CRITICAL: Only include features and changes that are explicitly described in the provided release notes. Do not infer, extrapolate, or invent features not present in the source data. If a capability is not mentioned in the notes, do not include it.`;
 
 const productBlocks = Object.entries(groups)
   .map(([product, entries]) => {
