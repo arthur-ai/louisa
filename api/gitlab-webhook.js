@@ -1,6 +1,7 @@
 import {
   getCommitsBetweenTags,
-  getMergeRequestsForCommits,
+  getMRsByDateRange,
+  getTagDate,
   getPreviousReleaseTag,
   getReleaseByTag,
   createRelease,
@@ -172,7 +173,9 @@ export default async function handler(req, res) {
 
   // Only generate release notes for successful production platform deployments.
   // Expected format: {version}-success-aws-prod-platform (e.g. 1.4.1892-success-aws-prod-platform)
-  if (!tag.endsWith("-success-aws-prod-platform")) {
+  // Suffix is configurable via GITLAB_PROD_TAG_SUFFIX env var (defaults to -success-aws-prod-platform).
+  const prodTagSuffix = process.env.GITLAB_PROD_TAG_SUFFIX || "-success-aws-prod-platform";
+  if (!tag.endsWith(prodTagSuffix)) {
     console.log(`Louisa: skipping non-production tag ${tag}`);
     return res.status(200).json({ skipped: true, reason: "non-production tag" });
   }
@@ -232,18 +235,35 @@ export default async function handler(req, res) {
       });
       const commits = [...backendCommits, ...frontendCommits];
       console.log(`Louisa: found ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
+      if (scopeProjectId && frontendCommits.length === 0) {
+        console.warn(`Louisa: no commits from scope project ${scopeProjectId} for range ${previousTag}...${tag} — verify tag exists in that repo`);
+      }
 
+      const [fromTagDate, toTagDate] = await Promise.all([
+        previousTag ? getTagDate(projectId, previousTag) : Promise.resolve(null),
+        getTagDate(projectId, tag),
+      ]);
       const [backendMRs, frontendMRs] = await activeSpan(tracer, "gitlab.get_merge_requests", {
         "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getMergeRequestsForCommits",
-        "tool.description":        "Fetches merged MRs from both platform repos associated with the release commits",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", shas: "string[]" }),
-        "input.value":             JSON.stringify({ projectId, scopeProjectId, backendCommits: backendCommits.length, frontendCommits: frontendCommits.length }),
+        "tool.name":               "gitlab.getMRsByDateRange",
+        "tool.description":        "Fetches merged MRs from both platform repos in the release window by date range, supporting squash-merge strategies",
+        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", fromDate: "string", toDate: "string" }),
+        "input.value":             JSON.stringify({ projectId, scopeProjectId, fromDate: fromTagDate, toDate: toTagDate }),
         "input.mime_type":         "application/json",
       }, async (s) => {
+        if (previousTag && !fromTagDate) {
+          console.warn(`Louisa: could not resolve date for previous tag ${previousTag} — skipping MR fetch to avoid epoch-range query`);
+          s.setAttribute("output.value",     "[]");
+          s.setAttribute("output.mime_type", "application/json");
+          return [[], []];
+        }
+        const from = fromTagDate || new Date(0).toISOString();
+        const to   = toTagDate
+          ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
+          : new Date().toISOString();
         const [bmr, fmr] = await Promise.all([
-          getMergeRequestsForCommits(projectId, backendCommits.map((c) => c.sha)),
-          scopeProjectId ? getMergeRequestsForCommits(scopeProjectId, frontendCommits.map((c) => c.sha)) : Promise.resolve([]),
+          getMRsByDateRange(projectId, from, to),
+          scopeProjectId ? getMRsByDateRange(scopeProjectId, from, to) : Promise.resolve([]),
         ]);
         s.setAttribute("output.value",     JSON.stringify([...bmr, ...fmr].map(mr => ({ number: mr.number, title: mr.title }))));
         s.setAttribute("output.mime_type", "application/json");

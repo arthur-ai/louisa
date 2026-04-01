@@ -1,7 +1,8 @@
 import { verifyGitHubSignature } from "../lib/crypto.js";
 import {
   getCommitsBetweenTags,
-  getPullRequestsForCommits,
+  getPRsByDateRange,
+  getTagDate,
   getPreviousReleaseTag,
   getReleaseByTag,
   createRelease,
@@ -100,16 +101,29 @@ export default async function handler(req, res) {
         });
         console.log(`Louisa: found ${commits.length} commits`);
 
-        const shas = commits.map((c) => c.sha);
+        const [fromTagDate, toTagDate] = await Promise.all([
+          previousTag ? getTagDate(owner, repo, previousTag) : Promise.resolve(null),
+          getTagDate(owner, repo, tag),
+        ]);
         const pullRequests = await activeSpan(tracer, "github.get_pull_requests", {
           "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPullRequestsForCommits",
-          "tool.description":        "Fetches merged pull requests associated with the release commits to enrich release notes with context",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", shas: "string[]" }),
-          "input.value":             JSON.stringify({ owner, repo, commitCount: shas.length }),
+          "tool.name":               "github.getPRsByDateRange",
+          "tool.description":        "Fetches merged pull requests in the release window by date range, supporting squash-merge strategies",
+          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", fromDate: "string", toDate: "string" }),
+          "input.value":             JSON.stringify({ owner, repo, fromDate: fromTagDate, toDate: toTagDate }),
           "input.mime_type":         "application/json",
         }, async (s) => {
-          const r = await getPullRequestsForCommits(owner, repo, shas);
+          if (previousTag && !fromTagDate) {
+            console.warn(`Louisa: could not resolve date for previous tag ${previousTag} — skipping PR fetch to avoid epoch-range query`);
+            s.setAttribute("output.value",     "[]");
+            s.setAttribute("output.mime_type", "application/json");
+            return [];
+          }
+          const from = fromTagDate || new Date(0).toISOString();
+          const to   = toTagDate
+            ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
+            : new Date().toISOString();
+          const r = await getPRsByDateRange(owner, repo, from, to);
           s.setAttribute("output.value",     JSON.stringify(r.map(pr => ({ number: pr.number, title: pr.title }))));
           s.setAttribute("output.mime_type", "application/json");
           return r;
@@ -228,16 +242,29 @@ export default async function handler(req, res) {
         });
         console.log(`Louisa: found ${commits.length} commits`);
 
-        const shas = commits.map((c) => c.sha);
+        const [fromTagDate, toTagDate] = await Promise.all([
+          previousTag ? getTagDate(owner, repo, previousTag) : Promise.resolve(null),
+          getTagDate(owner, repo, tag),
+        ]);
         const pullRequests = await activeSpan(tracer, "github.get_pull_requests", {
           "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPullRequestsForCommits",
-          "tool.description":        "Fetches merged pull requests associated with the release commits to enrich release notes with context",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", shas: "string[]" }),
-          "input.value":             JSON.stringify({ owner, repo, commitCount: shas.length }),
+          "tool.name":               "github.getPRsByDateRange",
+          "tool.description":        "Fetches merged pull requests in the release window by date range, supporting squash-merge strategies",
+          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", fromDate: "string", toDate: "string" }),
+          "input.value":             JSON.stringify({ owner, repo, fromDate: fromTagDate, toDate: toTagDate }),
           "input.mime_type":         "application/json",
         }, async (s) => {
-          const r = await getPullRequestsForCommits(owner, repo, shas);
+          if (previousTag && !fromTagDate) {
+            console.warn(`Louisa: could not resolve date for previous tag ${previousTag} — skipping PR fetch to avoid epoch-range query`);
+            s.setAttribute("output.value",     "[]");
+            s.setAttribute("output.mime_type", "application/json");
+            return [];
+          }
+          const from = fromTagDate || new Date(0).toISOString();
+          const to   = toTagDate
+            ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
+            : new Date().toISOString();
+          const r = await getPRsByDateRange(owner, repo, from, to);
           s.setAttribute("output.value",     JSON.stringify(r.map(pr => ({ number: pr.number, title: pr.title }))));
           s.setAttribute("output.mime_type", "application/json");
           return r;
