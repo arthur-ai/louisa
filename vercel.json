@@ -1,7 +1,6 @@
 {
   "functions": {
-    "api/webhook.js": {
-      "maxDuration": 60
-    }
+    "api/webhook.js": { "maxDuration": 60 },
+    "api/gitlab-webhook.js": { "maxDuration": 60 }
   }
 }
