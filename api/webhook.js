@@ -10,10 +10,10 @@ import {
   getPRCommits,
   getPRFiles,
   getPRComments,
-  updatePR,
 } from "../lib/github.js";
-import { generateReleaseNotes } from "../lib/claude.js";
-import { enrichPRDescription, isAlreadyEnriched, shouldSkipEnrichment } from "../lib/enrich.js";
+import { summarizePR, generateReleaseNotes } from "../lib/claude.js";
+import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
+import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -107,8 +107,8 @@ export default async function handler(req, res) {
         ]);
         const pullRequests = await activeSpan(tracer, "github.get_pull_requests", {
           "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPRsByDateRange",
-          "tool.description":        "Fetches merged pull requests in the release window by date range, supporting squash-merge strategies",
+          "tool.name":               "github.getPRsForRelease",
+          "tool.description":        "Resolves merged PRs for the release window — reads pre-computed summaries from log if available, falls back to GitHub Search API",
           "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", fromDate: "string", toDate: "string" }),
           "input.value":             JSON.stringify({ owner, repo, fromDate: fromTagDate, toDate: toTagDate }),
           "input.mime_type":         "application/json",
@@ -123,6 +123,25 @@ export default async function handler(req, res) {
           const to   = toTagDate
             ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
             : new Date().toISOString();
+
+          // Try the local summaries log first — populated at PR merge time
+          const cached = readSummariesInRange(`${owner}/${repo}`, from, to);
+          if (cached !== null) {
+            console.log(`Louisa: using ${cached.length} pre-computed PR summaries from log`);
+            s.setAttribute("output.value",     JSON.stringify(cached.map(e => ({ number: e.number, title: e.title }))));
+            s.setAttribute("output.mime_type", "application/json");
+            return cached.map((entry) => ({
+              number: entry.number,
+              title:  entry.title,
+              body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
+              author: entry.author,
+              labels: entry.labels || [],
+              url:    entry.url,
+            }));
+          }
+
+          // Summaries log absent — fall back to live GitHub Search API
+          console.log(`Louisa: summaries log not found, fetching PRs from GitHub API`);
           const r = await getPRsByDateRange(owner, repo, from, to);
           s.setAttribute("output.value",     JSON.stringify(r.map(pr => ({ number: pr.number, title: pr.title }))));
           s.setAttribute("output.mime_type", "application/json");
@@ -248,8 +267,8 @@ export default async function handler(req, res) {
         ]);
         const pullRequests = await activeSpan(tracer, "github.get_pull_requests", {
           "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPRsByDateRange",
-          "tool.description":        "Fetches merged pull requests in the release window by date range, supporting squash-merge strategies",
+          "tool.name":               "github.getPRsForRelease",
+          "tool.description":        "Resolves merged PRs for the release window — reads pre-computed summaries from log if available, falls back to GitHub Search API",
           "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", fromDate: "string", toDate: "string" }),
           "input.value":             JSON.stringify({ owner, repo, fromDate: fromTagDate, toDate: toTagDate }),
           "input.mime_type":         "application/json",
@@ -264,6 +283,25 @@ export default async function handler(req, res) {
           const to   = toTagDate
             ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
             : new Date().toISOString();
+
+          // Try the local summaries log first — populated at PR merge time
+          const cached = readSummariesInRange(`${owner}/${repo}`, from, to);
+          if (cached !== null) {
+            console.log(`Louisa: using ${cached.length} pre-computed PR summaries from log`);
+            s.setAttribute("output.value",     JSON.stringify(cached.map(e => ({ number: e.number, title: e.title }))));
+            s.setAttribute("output.mime_type", "application/json");
+            return cached.map((entry) => ({
+              number: entry.number,
+              title:  entry.title,
+              body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
+              author: entry.author,
+              labels: entry.labels || [],
+              url:    entry.url,
+            }));
+          }
+
+          // Summaries log absent — fall back to live GitHub Search API
+          console.log(`Louisa: summaries log not found, fetching PRs from GitHub API`);
           const r = await getPRsByDateRange(owner, repo, from, to);
           s.setAttribute("output.value",     JSON.stringify(r.map(pr => ({ number: pr.number, title: pr.title }))));
           s.setAttribute("output.mime_type", "application/json");
@@ -317,7 +355,7 @@ export default async function handler(req, res) {
     }
   }
 
-  // ─── PR merged: enrich title and description ──────────────────────────────
+  // ─── PR merged: generate summary and append to log ───────────────────────────
   if (
     event === "pull_request" &&
     payload.action === "closed" &&
@@ -328,32 +366,24 @@ export default async function handler(req, res) {
     const repo     = payload.repository.name;
     const prNumber = pr.number;
 
-    // Skip draft PRs — they signal work-in-progress, not shipped changes
     if (pr.draft) {
       return res.status(200).json({ skipped: true, reason: "draft PR" });
     }
 
-    // Skip bot/automated PRs — only enrich work by real developers
-    const { skip: skipBot, reason: botReason } = shouldSkipEnrichment({
+    const { skip, reason: skipReason } = shouldSkipEnrichment({
       title:          pr.title,
       authorUsername: pr.user?.login ?? "",
-      authorType:     pr.user?.type ?? "",
+      authorType:     pr.user?.type  ?? "",
     });
-    if (skipBot) {
-      console.log(`Louisa: skipping PR #${prNumber} — ${botReason}`);
-      return res.status(200).json({ skipped: true, reason: botReason });
+    if (skip) {
+      console.log(`Louisa: skipping PR #${prNumber} — ${skipReason}`);
+      return res.status(200).json({ skipped: true, reason: skipReason });
     }
 
-    // Idempotency: skip if Louisa has already enriched this PR
-    if (isAlreadyEnriched(pr.body)) {
-      console.log(`Louisa: PR #${prNumber} already enriched, skipping`);
-      return res.status(200).json({ skipped: true, reason: "already enriched" });
-    }
-
-    console.log(`Louisa: enriching merged PR #${prNumber} — "${pr.title}"`);
+    console.log(`Louisa: summarising merged PR #${prNumber} — "${pr.title}"`);
 
     try {
-      const result = await activeSpan(tracer, "louisa.github.enrich_pr", {
+      const result = await activeSpan(tracer, "louisa.github.summarize_pr", {
         "openinference.span.kind": "CHAIN",
         "agent.name":              "Louisa",
         "input.value":             JSON.stringify({ event: "pr_merged", prNumber, repository: `${owner}/${repo}` }),
@@ -380,52 +410,51 @@ export default async function handler(req, res) {
           return [c, f, co];
         });
 
-        console.log(`Louisa: PR #${prNumber} context — ${commits.length} commits, ${files.length} files, ${comments.length} comments`);
-
-        const { title: enrichedTitle, body: enrichedBody } = await activeSpan(tracer, "louisa.enrich_pr_description", {
+        const { summary, type, userImpact } = await activeSpan(tracer, "louisa.summarize_pr", {
           "openinference.span.kind": "TOOL",
-          "tool.name":               "louisa.enrichPRDescription",
-          "tool.description":        "Calls Claude to rewrite the PR title and description into a structured format optimised for release notes and marketing content",
-          "tool.parameters":         JSON.stringify({ platform: "string", originalTitle: "string", originalBody: "string", commits: "array", files: "array", comments: "array" }),
-          "input.value":             JSON.stringify({ prNumber, originalTitle: pr.title }),
+          "tool.name":               "louisa.summarizePR",
+          "tool.description":        "Calls Claude to generate a compact summary of the PR for the summaries log",
+          "tool.parameters":         JSON.stringify({ platform: "string", title: "string", body: "string", commits: "array", files: "array", comments: "array" }),
+          "input.value":             JSON.stringify({ prNumber, title: pr.title }),
           "input.mime_type":         "application/json",
         }, async (s) => {
-          const r = await enrichPRDescription({
-            platform:      "github",
-            originalTitle: pr.title,
-            originalBody:  pr.body || "",
+          const r = await summarizePR({
+            platform: "github",
+            title:    pr.title,
+            body:     pr.body || "",
             commits,
             files,
             comments,
           });
-          s.setAttribute("output.value",     r.title);
+          s.setAttribute("output.value",     r.summary);
           s.setAttribute("output.mime_type", "text/plain");
           return r;
         });
 
-        await activeSpan(tracer, "github.update_pr", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "github.updatePR",
-          "tool.description":        "Writes the enriched title and structured description back to the merged PR",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", prNumber: "integer", title: "string", body: "string" }),
-          "input.value":             JSON.stringify({ owner, repo, prNumber, enrichedTitle }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          await updatePR(owner, repo, prNumber, enrichedTitle, enrichedBody);
-          s.setAttribute("output.value",     "updated");
-          s.setAttribute("output.mime_type", "text/plain");
+        appendSummary({
+          platform:   "github",
+          repo:       `${owner}/${repo}`,
+          number:     prNumber,
+          title:      pr.title,
+          summary,
+          type,
+          userImpact,
+          author:     pr.user?.login,
+          labels:     (pr.labels || []).map((l) => l.name),
+          url:        pr.html_url,
+          mergedAt:   pr.merged_at,
         });
 
-        rootSpan.setAttribute("output.value",     `PR #${prNumber} enriched`);
+        rootSpan.setAttribute("output.value",     `PR #${prNumber} summarised`);
         rootSpan.setAttribute("output.mime_type", "text/plain");
-        console.log(`Louisa: PR #${prNumber} enriched — "${enrichedTitle}"`);
-        return { ok: true, prNumber, action: "enriched", enrichedTitle };
+        console.log(`Louisa: PR #${prNumber} summarised (${type})`);
+        return { ok: true, prNumber, action: "summarised", type };
       });
 
       await forceFlush();
       return res.status(200).json(result);
     } catch (err) {
-      console.error(`Louisa: error enriching PR #${prNumber}`, err);
+      console.error(`Louisa: error summarising PR #${prNumber}`, err);
       await forceFlush();
       return res.status(500).json({ error: err.message });
     }

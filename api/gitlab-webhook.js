@@ -9,10 +9,11 @@ import {
   getMRCommits,
   getMRChanges,
   getMRNotes,
-  updateMR,
 } from "../lib/gitlab.js";
+import { summarizePR } from "../lib/claude.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
-import { enrichPRDescription, isAlreadyEnriched, shouldSkipEnrichment } from "../lib/enrich.js";
+import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
+import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
@@ -36,118 +37,9 @@ export default async function handler(req, res) {
   // Initialise the OTel provider (+ Anthropic auto-instrumentation) once per container.
   const tracer = getTracer();
 
-  // ─── MR merged: enrich title and description ────────────────────────────────
+  // ─── MR merged: generate summary and append to log ────────────────────────
   if (eventType === "merge_request") {
-    const attrs    = payload.object_attributes;
-    const mrIid    = attrs?.iid;
-    const projectId = attrs?.target_project_id || payload.project?.id || process.env.GITLAB_PROJECT_ID;
-
-    // Only act on the "merge" action (not open, update, close, etc.)
-    if (attrs?.action !== "merge") {
-      return res.status(200).json({ skipped: true, reason: `mr action=${attrs?.action}` });
-    }
-
-    const originalTitle = attrs?.title || "";
-    const originalBody  = attrs?.description || "";
-
-    // Skip bot/automated MRs — only enrich work by real developers
-    const mrAuthor = payload.user || {};
-    const { skip: skipBot, reason: botReason } = shouldSkipEnrichment({
-      title:          originalTitle,
-      authorUsername: mrAuthor.username ?? "",
-      // GitLab marks bot users with user_type === "project_bot" or "service_account"
-      authorType:     mrAuthor.bot ? "Bot" : (mrAuthor.user_type ?? ""),
-    });
-    if (skipBot) {
-      console.log(`Louisa: skipping MR !${mrIid} — ${botReason}`);
-      return res.status(200).json({ skipped: true, reason: botReason });
-    }
-
-    // Idempotency: skip if Louisa has already enriched this MR
-    if (isAlreadyEnriched(originalBody)) {
-      console.log(`Louisa: MR !${mrIid} already enriched, skipping`);
-      return res.status(200).json({ skipped: true, reason: "already enriched" });
-    }
-
-    console.log(`Louisa: enriching merged MR !${mrIid} — "${originalTitle}"`);
-
-    try {
-      const result = await activeSpan(tracer, "louisa.gitlab.enrich_mr", {
-        "openinference.span.kind": "CHAIN",
-        "agent.name":              "Louisa",
-        "input.value":             JSON.stringify({ event: "mr_merged", mrIid, projectId: String(projectId) }),
-        "input.mime_type":         "application/json",
-        "mr_iid":                  String(mrIid),
-        "project_id":              String(projectId),
-      }, async (rootSpan) => {
-
-        const [commits, files, comments] = await activeSpan(tracer, "gitlab.get_mr_context", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "gitlab.getMRContext",
-          "tool.description":        "Fetches commits, changed files, and discussion notes from the merged MR",
-          "tool.parameters":         JSON.stringify({ projectId: "string|number", mrIid: "integer" }),
-          "input.value":             JSON.stringify({ projectId, mrIid }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const [c, f, co] = await Promise.all([
-            getMRCommits(projectId, mrIid),
-            getMRChanges(projectId, mrIid),
-            getMRNotes(projectId, mrIid),
-          ]);
-          s.setAttribute("output.value",     JSON.stringify({ commits: c.length, files: f.length, comments: co.length }));
-          s.setAttribute("output.mime_type", "application/json");
-          return [c, f, co];
-        });
-
-        console.log(`Louisa: MR !${mrIid} context — ${commits.length} commits, ${files.length} files, ${comments.length} comments`);
-
-        const { title: enrichedTitle, body: enrichedBody } = await activeSpan(tracer, "louisa.enrich_mr_description", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "louisa.enrichMRDescription",
-          "tool.description":        "Calls Claude to rewrite the MR title and description into a structured format optimised for release notes and marketing content",
-          "tool.parameters":         JSON.stringify({ platform: "string", originalTitle: "string", originalBody: "string", commits: "array", files: "array", comments: "array" }),
-          "input.value":             JSON.stringify({ mrIid, originalTitle }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const r = await enrichPRDescription({
-            platform:      "gitlab",
-            originalTitle,
-            originalBody,
-            commits,
-            files,
-            comments,
-          });
-          s.setAttribute("output.value",     r.title);
-          s.setAttribute("output.mime_type", "text/plain");
-          return r;
-        });
-
-        await activeSpan(tracer, "gitlab.update_mr", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "gitlab.updateMR",
-          "tool.description":        "Writes the enriched title and structured description back to the merged MR",
-          "tool.parameters":         JSON.stringify({ projectId: "string|number", mrIid: "integer", title: "string", description: "string" }),
-          "input.value":             JSON.stringify({ projectId, mrIid, enrichedTitle }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          await updateMR(projectId, mrIid, enrichedTitle, enrichedBody);
-          s.setAttribute("output.value",     "updated");
-          s.setAttribute("output.mime_type", "text/plain");
-        });
-
-        rootSpan.setAttribute("output.value",     `MR !${mrIid} enriched`);
-        rootSpan.setAttribute("output.mime_type", "text/plain");
-        console.log(`Louisa: MR !${mrIid} enriched — "${enrichedTitle}"`);
-        return { ok: true, mrIid, action: "enriched", enrichedTitle };
-      });
-
-      await forceFlush();
-      return res.status(200).json(result);
-    } catch (err) {
-      console.error(`Louisa: error enriching MR !${mrIid}`, err);
-      await forceFlush();
-      return res.status(500).json({ error: err.message });
-    }
+    return handleMRMerged(req, res, tracer, payload);
   }
 
   // Only handle tag push events for release note generation
@@ -245,8 +137,8 @@ export default async function handler(req, res) {
       ]);
       const [backendMRs, frontendMRs] = await activeSpan(tracer, "gitlab.get_merge_requests", {
         "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getMRsByDateRange",
-        "tool.description":        "Fetches merged MRs from both platform repos in the release window by date range, supporting squash-merge strategies",
+        "tool.name":               "gitlab.getMRsForRelease",
+        "tool.description":        "Resolves merged MRs for the release window — reads pre-computed summaries from log if available, falls back to GitLab API",
         "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", fromDate: "string", toDate: "string" }),
         "input.value":             JSON.stringify({ projectId, scopeProjectId, fromDate: fromTagDate, toDate: toTagDate }),
         "input.mime_type":         "application/json",
@@ -261,6 +153,29 @@ export default async function handler(req, res) {
         const to   = toTagDate
           ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
           : new Date().toISOString();
+
+        // Try the local summaries log first — populated at MR merge time
+        const cachedBackend  = readSummariesInRange(String(projectId), from, to);
+        const cachedFrontend = scopeProjectId ? readSummariesInRange(String(scopeProjectId), from, to) : [];
+        if (cachedBackend !== null) {
+          const toMR = (entry) => ({
+            number: entry.number,
+            title:  entry.title,
+            body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
+            author: entry.author,
+            labels: entry.labels || [],
+            url:    entry.url,
+          });
+          const bmr = cachedBackend.map(toMR);
+          const fmr = (cachedFrontend || []).map(toMR);
+          console.log(`Louisa: using pre-computed summaries from log (${bmr.length} backend, ${fmr.length} frontend)`);
+          s.setAttribute("output.value",     JSON.stringify([...bmr, ...fmr].map(mr => ({ number: mr.number, title: mr.title }))));
+          s.setAttribute("output.mime_type", "application/json");
+          return [bmr, fmr];
+        }
+
+        // Summaries log absent — fall back to live GitLab API
+        console.log(`Louisa: summaries log not found, fetching MRs from GitLab API`);
         const [bmr, fmr] = await Promise.all([
           getMRsByDateRange(projectId, from, to),
           scopeProjectId ? getMRsByDateRange(scopeProjectId, from, to) : Promise.resolve([]),
@@ -332,6 +247,108 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
   } catch (err) {
     console.error("Louisa: error creating GitLab release", err);
+    await forceFlush();
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ─── MR merged: generate summary and append to log ───────────────────────────
+async function handleMRMerged(req, res, tracer, payload) {
+  const attrs     = payload.object_attributes;
+  const mrIid     = attrs?.iid;
+  const projectId = String(attrs?.target_project_id || payload.project?.id || process.env.GITLAB_PROJECT_ID);
+
+  if (attrs?.action !== "merge") {
+    return res.status(200).json({ skipped: true, reason: `mr action=${attrs?.action}` });
+  }
+
+  const originalTitle = attrs?.title || "";
+  const mrAuthor      = payload.user || {};
+  const { skip, reason: skipReason } = shouldSkipEnrichment({
+    title:          originalTitle,
+    authorUsername: mrAuthor.username ?? "",
+    authorType:     mrAuthor.bot ? "Bot" : (mrAuthor.user_type ?? ""),
+  });
+  if (skip) {
+    console.log(`Louisa: skipping MR !${mrIid} — ${skipReason}`);
+    return res.status(200).json({ skipped: true, reason: skipReason });
+  }
+
+  console.log(`Louisa: summarising merged MR !${mrIid} — "${originalTitle}"`);
+
+  try {
+    const result = await activeSpan(tracer, "louisa.gitlab.summarize_mr", {
+      "openinference.span.kind": "CHAIN",
+      "agent.name":              "Louisa",
+      "input.value":             JSON.stringify({ event: "mr_merged", mrIid, projectId }),
+      "input.mime_type":         "application/json",
+      "mr_iid":                  String(mrIid),
+      "project_id":              projectId,
+    }, async (rootSpan) => {
+
+      const [commits, files, comments] = await activeSpan(tracer, "gitlab.get_mr_context", {
+        "openinference.span.kind": "TOOL",
+        "tool.name":               "gitlab.getMRContext",
+        "tool.description":        "Fetches commits, changed files, and discussion notes from the merged MR",
+        "tool.parameters":         JSON.stringify({ projectId: "string|number", mrIid: "integer" }),
+        "input.value":             JSON.stringify({ projectId, mrIid }),
+        "input.mime_type":         "application/json",
+      }, async (s) => {
+        const [c, f, co] = await Promise.all([
+          getMRCommits(projectId, mrIid),
+          getMRChanges(projectId, mrIid),
+          getMRNotes(projectId, mrIid),
+        ]);
+        s.setAttribute("output.value",     JSON.stringify({ commits: c.length, files: f.length, comments: co.length }));
+        s.setAttribute("output.mime_type", "application/json");
+        return [c, f, co];
+      });
+
+      const { summary, type, userImpact } = await activeSpan(tracer, "louisa.summarize_mr", {
+        "openinference.span.kind": "TOOL",
+        "tool.name":               "louisa.summarizePR",
+        "tool.description":        "Calls Claude to generate a compact summary of the MR for the summaries log",
+        "tool.parameters":         JSON.stringify({ platform: "string", title: "string", body: "string", commits: "array", files: "array", comments: "array" }),
+        "input.value":             JSON.stringify({ mrIid, title: originalTitle }),
+        "input.mime_type":         "application/json",
+      }, async (s) => {
+        const r = await summarizePR({
+          platform: "gitlab",
+          title:    originalTitle,
+          body:     attrs?.description || "",
+          commits,
+          files,
+          comments,
+        });
+        s.setAttribute("output.value",     r.summary);
+        s.setAttribute("output.mime_type", "text/plain");
+        return r;
+      });
+
+      appendSummary({
+        platform:   "gitlab",
+        repo:       projectId,
+        number:     mrIid,
+        title:      originalTitle,
+        summary,
+        type,
+        userImpact,
+        author:     mrAuthor.username,
+        labels:     attrs?.labels || [],
+        url:        attrs?.url,
+        mergedAt:   attrs?.merged_at || new Date().toISOString(),
+      });
+
+      rootSpan.setAttribute("output.value",     `MR !${mrIid} summarised`);
+      rootSpan.setAttribute("output.mime_type", "text/plain");
+      console.log(`Louisa: MR !${mrIid} summarised (${type})`);
+      return { ok: true, mrIid, action: "summarised", type };
+    });
+
+    await forceFlush();
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error(`Louisa: error summarising MR !${mrIid}`, err);
     await forceFlush();
     return res.status(500).json({ error: err.message });
   }
