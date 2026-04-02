@@ -301,7 +301,9 @@ On your GitHub repo, go to **Settings → Webhooks → Add webhook**:
 On your GitLab project, go to **Settings → Webhooks → Add new webhook**:
 1. **URL:** `https://your-vercel-domain.vercel.app/api/gitlab-webhook`
 2. **Secret token:** the same value as `GITLAB_WEBHOOK_SECRET`
-3. **Trigger:** Check only **Tag push events**
+3. **Triggers:** Check the following events:
+   - **Tag push events** (triggers release note generation)
+   - **Merge request events** (triggers MR enrichment on merge)
 
 ---
 
