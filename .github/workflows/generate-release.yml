@@ -7,6 +7,17 @@ name: Generate Release Notes
 on:
   repository_dispatch:
     types: [louisa-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitLab prod tag (e.g. 1.4.1892-success-aws-prod-platform)"
+        required: true
+      projectId:
+        description: "GitLab project ID (defaults to GITLAB_PROJECT_ID secret)"
+        required: false
+      scopeProjectId:
+        description: "Scope/frontend project ID (optional)"
+        required: false
 
 jobs:
   generate:
@@ -35,9 +46,9 @@ jobs:
           ARTHUR_BASE_URL:         ${{ secrets.ARTHUR_BASE_URL }}
           ARTHUR_API_KEY:          ${{ secrets.ARTHUR_API_KEY }}
           ARTHUR_TASK_ID:          ${{ secrets.ARTHUR_TASK_ID }}
-          TAG:                     ${{ github.event.client_payload.tag }}
-          PROJECT_ID:              ${{ github.event.client_payload.projectId }}
-          SCOPE_PROJECT_ID:        ${{ github.event.client_payload.scopeProjectId }}
+          TAG:              ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+          PROJECT_ID:       ${{ github.event.client_payload.projectId || github.event.inputs.projectId || secrets.GITLAB_PROJECT_ID }}
+          SCOPE_PROJECT_ID: ${{ github.event.client_payload.scopeProjectId || github.event.inputs.scopeProjectId }}
         run: |
           SCOPE_ARG=""
           if [ -n "$SCOPE_PROJECT_ID" ]; then
@@ -53,5 +64,5 @@ jobs:
           git config user.name "louisa-bot"
           git config user.email "louisa-bot@users.noreply.github.com"
           git add logs/
-          git diff --staged --quiet || git commit -m "chore: summaries log for ${{ github.event.client_payload.tag }}"
+          git diff --staged --quiet || git commit -m "chore: summaries log for ${{ github.event.client_payload.tag || github.event.inputs.tag }}"
           git push
