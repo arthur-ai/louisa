@@ -6,5 +6,6 @@ node_modules/
 .env*.local
 logs/*
 !logs/.gitkeep
+!logs/pr-summaries.jsonl
 output/*
 !output/.gitkeep
