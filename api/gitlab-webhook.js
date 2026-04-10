@@ -1,5 +1,6 @@
 import {
   getCommitsBetweenTags,
+  getCommitsBetweenDates,
   getMRsByDateRange,
   getTagDate,
   getPreviousReleaseTag,
@@ -109,6 +110,14 @@ export default async function handler(req, res) {
       // project ID is configured. Falls back to single-repo mode when not set.
       const rawScopeId    = process.env.GITLAB_SCOPE_PROJECT_ID;
       const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
+
+      // Fetch tag dates first — needed to query the scope project by date range,
+      // since backend tag names don't exist in the frontend repo.
+      const [fromTagDate, toTagDate] = await Promise.all([
+        previousTag ? getTagDate(projectId, previousTag) : Promise.resolve(null),
+        getTagDate(projectId, tag),
+      ]);
+
       const [backendCommits, frontendCommits] = await activeSpan(tracer, "gitlab.get_commits", {
         "openinference.span.kind": "TOOL",
         "tool.name":               "gitlab.getCommitsBetweenTags",
@@ -117,9 +126,19 @@ export default async function handler(req, res) {
         "input.value":             JSON.stringify({ projectId, scopeProjectId, base: previousTag, head: tag }),
         "input.mime_type":         "application/json",
       }, async (s) => {
+        // Backend: use tag-based compare (tags exist in this repo)
+        // Frontend/scope: use date-range query — backend tags don't exist there
+        const frontendPromise = (() => {
+          if (!scopeProjectId) return Promise.resolve([]);
+          if (fromTagDate && toTagDate) {
+            return getCommitsBetweenDates(scopeProjectId, fromTagDate, toTagDate);
+          }
+          // No previous tag date — fall back to last 50 commits on default branch
+          return getCommitsBetweenDates(scopeProjectId, new Date(0).toISOString(), toTagDate || new Date().toISOString());
+        })();
         const [bc, fc] = await Promise.all([
           getCommitsBetweenTags(projectId, previousTag, tag),
-          scopeProjectId ? getCommitsBetweenTags(scopeProjectId, previousTag, tag) : Promise.resolve([]),
+          frontendPromise,
         ]);
         s.setAttribute("output.value",     JSON.stringify({ backend: bc.length, frontend: fc.length }));
         s.setAttribute("output.mime_type", "application/json");
@@ -127,14 +146,6 @@ export default async function handler(req, res) {
       });
       const commits = [...backendCommits, ...frontendCommits];
       console.log(`Louisa: found ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
-      if (scopeProjectId && frontendCommits.length === 0) {
-        console.warn(`Louisa: no commits from scope project ${scopeProjectId} for range ${previousTag}...${tag} — verify tag exists in that repo`);
-      }
-
-      const [fromTagDate, toTagDate] = await Promise.all([
-        previousTag ? getTagDate(projectId, previousTag) : Promise.resolve(null),
-        getTagDate(projectId, tag),
-      ]);
       const [backendMRs, frontendMRs] = await activeSpan(tracer, "gitlab.get_merge_requests", {
         "openinference.span.kind": "TOOL",
         "tool.name":               "gitlab.getMRsForRelease",
