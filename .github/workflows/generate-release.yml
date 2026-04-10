@@ -1,0 +1,68 @@
+name: Generate Release Notes
+
+# Triggered by api/gitlab-webhook.js when a production GitLab tag is pushed.
+# Runs summarization + release note generation with no 60-second time constraint,
+# then commits the updated summaries log back to the repo for future releases.
+
+on:
+  repository_dispatch:
+    types: [louisa-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "GitLab prod tag (e.g. 1.4.1892-success-aws-prod-platform)"
+        required: true
+      projectId:
+        description: "GitLab project ID (defaults to GITLAB_PROJECT_ID secret)"
+        required: false
+      scopeProjectId:
+        description: "Scope/frontend project ID (optional)"
+        required: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the updated logs/pr-summaries.jsonl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Summarize MRs and generate release notes
+        env:
+          GITLAB_TOKEN:            ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROD_TAG_SUFFIX:  ${{ secrets.GITLAB_PROD_TAG_SUFFIX }}
+          ANTHROPIC_API_KEY:       ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL:       ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL:       ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ARTHUR_BASE_URL:         ${{ secrets.ARTHUR_BASE_URL }}
+          ARTHUR_API_KEY:          ${{ secrets.ARTHUR_API_KEY }}
+          ARTHUR_TASK_ID:          ${{ secrets.ARTHUR_TASK_ID }}
+          TAG:              ${{ github.event.client_payload.tag || github.event.inputs.tag }}
+          PROJECT_ID:       ${{ github.event.client_payload.projectId || github.event.inputs.projectId || secrets.GITLAB_PROJECT_ID }}
+          SCOPE_PROJECT_ID: ${{ github.event.client_payload.scopeProjectId || github.event.inputs.scopeProjectId }}
+        run: |
+          SCOPE_ARG=""
+          if [ -n "$SCOPE_PROJECT_ID" ]; then
+            SCOPE_ARG="--scope-project-id $SCOPE_PROJECT_ID"
+          fi
+          node scripts/generate-release-notes.js \
+            --tag "$TAG" \
+            --project-id "$PROJECT_ID" \
+            $SCOPE_ARG
+
+      - name: Commit updated summaries log
+        run: |
+          git config user.name "louisa-bot"
+          git config user.email "louisa-bot@users.noreply.github.com"
+          git add logs/
+          git diff --staged --quiet || git commit -m "chore: summaries log for ${{ github.event.client_payload.tag || github.event.inputs.tag }}"
+          git push

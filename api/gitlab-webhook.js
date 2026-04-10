@@ -1,20 +1,12 @@
 import {
-  getCommitsBetweenTags,
-  getMRsByDateRange,
-  getTagDate,
-  getPreviousReleaseTag,
   getReleaseByTag,
-  createRelease,
-  getProjectUrl,
   getMRCommits,
   getMRChanges,
   getMRNotes,
 } from "../lib/gitlab.js";
 import { summarizePR } from "../lib/claude.js";
-import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
-import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
+import { appendSummary } from "../lib/summaries.js";
 import { shouldSkipEnrichment } from "../lib/enrich.js";
-import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
 
 export const config = { maxDuration: 60 };
@@ -73,182 +65,59 @@ export default async function handler(req, res) {
   }
 
   try {
-    const result = await activeSpan(tracer, "louisa.gitlab.release", {
-      "openinference.span.kind": "CHAIN",
-      "agent.name":              "Louisa",
-      "input.value":             JSON.stringify({ tag, projectId: String(projectId) }),
-      "input.mime_type":         "application/json",
-      "tag":                     tag,
-      "project_id":              String(projectId),
-    }, async (rootSpan) => {
+    // Quick idempotency check — if the release already exists, no need to trigger the Action.
+    const existing = await getReleaseByTag(projectId, tag);
+    if (existing) {
+      console.log(`Louisa: GitLab release already exists for ${tag}, skipping`);
+      return res.status(200).json({ skipped: true, reason: "release already exists" });
+    }
 
-      const existing = await getReleaseByTag(projectId, tag);
-      if (existing) {
-        console.log(`Louisa: GitLab release already exists for ${tag}, skipping`);
-        rootSpan.setAttribute("output.value",     "skipped: release already exists");
-        rootSpan.setAttribute("output.mime_type", "text/plain");
-        return { skipped: true, reason: "release already exists" };
-      }
+    // Dispatch the GitHub Action which will: summarize MRs → generate notes → create release → notify.
+    const rawScopeId     = process.env.GITLAB_SCOPE_PROJECT_ID;
+    const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
+    await dispatchReleaseAction({ tag, projectId: String(projectId), scopeProjectId });
 
-      const previousTag = await activeSpan(tracer, "gitlab.get_previous_tag", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getPreviousReleaseTag",
-        "tool.description":        "Finds the most recent release tag before the given tag to determine the commit diff range",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", tag: "string" }),
-        "input.value":             JSON.stringify({ projectId, tag }),
-        "input.mime_type":         "application/json",
-      }, async (s) => {
-        const r = await getPreviousReleaseTag(projectId, tag);
-        s.setAttribute("output.value",     r || "(none)");
-        s.setAttribute("output.mime_type", "text/plain");
-        return r;
-      });
-      console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
-
-      // Fetch commits from both platform repos (backend + frontend) in parallel if a second
-      // project ID is configured. Falls back to single-repo mode when not set.
-      const rawScopeId    = process.env.GITLAB_SCOPE_PROJECT_ID;
-      const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
-      const [backendCommits, frontendCommits] = await activeSpan(tracer, "gitlab.get_commits", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getCommitsBetweenTags",
-        "tool.description":        "Retrieves all commits between two tags across both platform repos (backend + frontend)",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", base: "string", head: "string" }),
-        "input.value":             JSON.stringify({ projectId, scopeProjectId, base: previousTag, head: tag }),
-        "input.mime_type":         "application/json",
-      }, async (s) => {
-        const [bc, fc] = await Promise.all([
-          getCommitsBetweenTags(projectId, previousTag, tag),
-          scopeProjectId ? getCommitsBetweenTags(scopeProjectId, previousTag, tag) : Promise.resolve([]),
-        ]);
-        s.setAttribute("output.value",     JSON.stringify({ backend: bc.length, frontend: fc.length }));
-        s.setAttribute("output.mime_type", "application/json");
-        return [bc, fc];
-      });
-      const commits = [...backendCommits, ...frontendCommits];
-      console.log(`Louisa: found ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
-      if (scopeProjectId && frontendCommits.length === 0) {
-        console.warn(`Louisa: no commits from scope project ${scopeProjectId} for range ${previousTag}...${tag} — verify tag exists in that repo`);
-      }
-
-      const [fromTagDate, toTagDate] = await Promise.all([
-        previousTag ? getTagDate(projectId, previousTag) : Promise.resolve(null),
-        getTagDate(projectId, tag),
-      ]);
-      const [backendMRs, frontendMRs] = await activeSpan(tracer, "gitlab.get_merge_requests", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getMRsForRelease",
-        "tool.description":        "Resolves merged MRs for the release window — reads pre-computed summaries from log if available, falls back to GitLab API",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", scopeProjectId: "string|number", fromDate: "string", toDate: "string" }),
-        "input.value":             JSON.stringify({ projectId, scopeProjectId, fromDate: fromTagDate, toDate: toTagDate }),
-        "input.mime_type":         "application/json",
-      }, async (s) => {
-        if (previousTag && !fromTagDate) {
-          console.warn(`Louisa: could not resolve date for previous tag ${previousTag} — skipping MR fetch to avoid epoch-range query`);
-          s.setAttribute("output.value",     "[]");
-          s.setAttribute("output.mime_type", "application/json");
-          return [[], []];
-        }
-        const from = fromTagDate || new Date(0).toISOString();
-        const to   = toTagDate
-          ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
-          : new Date().toISOString();
-
-        // Try the local summaries log first — populated at MR merge time
-        const cachedBackend  = readSummariesInRange(String(projectId), from, to);
-        const cachedFrontend = scopeProjectId ? readSummariesInRange(String(scopeProjectId), from, to) : [];
-        if (cachedBackend !== null) {
-          const toMR = (entry) => ({
-            number: entry.number,
-            title:  entry.title,
-            body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
-            author: entry.author,
-            labels: entry.labels || [],
-            url:    entry.url,
-          });
-          const bmr = cachedBackend.map(toMR);
-          const fmr = (cachedFrontend || []).map(toMR);
-          console.log(`Louisa: using pre-computed summaries from log (${bmr.length} backend, ${fmr.length} frontend)`);
-          s.setAttribute("output.value",     JSON.stringify([...bmr, ...fmr].map(mr => ({ number: mr.number, title: mr.title }))));
-          s.setAttribute("output.mime_type", "application/json");
-          return [bmr, fmr];
-        }
-
-        // Summaries log absent — fall back to live GitLab API
-        console.log(`Louisa: summaries log not found, fetching MRs from GitLab API`);
-        const [bmr, fmr] = await Promise.all([
-          getMRsByDateRange(projectId, from, to),
-          scopeProjectId ? getMRsByDateRange(scopeProjectId, from, to) : Promise.resolve([]),
-        ]);
-        s.setAttribute("output.value",     JSON.stringify([...bmr, ...fmr].map(mr => ({ number: mr.number, title: mr.title }))));
-        s.setAttribute("output.mime_type", "application/json");
-        return [bmr, fmr];
-      });
-      const mergeRequests = [...backendMRs, ...frontendMRs];
-      console.log(`Louisa: found ${mergeRequests.length} merged MRs (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
-
-      // generatePlatformReleaseNotes() calls client.messages.create() internally.
-      // AnthropicInstrumentation auto-creates an LLM span as a child of rootSpan.
-      const { text: notes } = await generatePlatformReleaseNotes({ tagName: tag, releaseName: tag, commits, mergeRequests, previousTag });
-
-      const footer  = "\n\n---\n_Release notes generated by Louisa_";
-      const created = await activeSpan(tracer, "gitlab.create_release", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.createRelease",
-        "tool.description":        "Publishes the AI-generated release notes as a GitLab Release for the tag",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number", tag: "string", name: "string", description: "string" }),
-        "input.value":             JSON.stringify({ projectId, tag }),
-        "input.mime_type":         "application/json",
-      }, async (s) => {
-        const r = await createRelease(projectId, tag, tag, notes + footer);
-        s.setAttribute("output.value",     r._links?.self || "");
-        s.setAttribute("output.mime_type", "text/plain");
-        return r;
-      });
-
-      const projectUrl = await activeSpan(tracer, "gitlab.get_project_url", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "gitlab.getProjectUrl",
-        "tool.description":        "Retrieves the GitLab project web URL to build the release permalink",
-        "tool.parameters":         JSON.stringify({ projectId: "string|number" }),
-        "input.value":             String(projectId),
-        "input.mime_type":         "text/plain",
-      }, async (s) => {
-        const r = await getProjectUrl(projectId);
-        s.setAttribute("output.value",     r || "");
-        s.setAttribute("output.mime_type", "text/plain");
-        return r;
-      });
-
-      const releaseUrl = projectUrl
-        ? `${projectUrl}/-/releases/${encodeURIComponent(tag)}`
-        : created._links?.self || "";
-
-      await activeSpan(tracer, "slack.post_notification", {
-        "openinference.span.kind": "TOOL",
-        "tool.name":               "notifications.postReleaseNotification",
-        "tool.description":        "Posts a release notification to configured channels (Slack and/or Teams) via Incoming Webhook",
-        "tool.parameters":         JSON.stringify({ tag: "string", releaseUrl: "string", notes: "string" }),
-        "input.value":             JSON.stringify({ tag, releaseUrl }),
-        "input.mime_type":         "application/json",
-      }, async (s) => {
-        await postReleaseNotification(tag, releaseUrl, notes);
-        s.setAttribute("output.value",     "notification sent");
-        s.setAttribute("output.mime_type", "text/plain");
-      });
-
-      rootSpan.setAttribute("output.value",     releaseUrl);
-      rootSpan.setAttribute("output.mime_type", "text/plain");
-      console.log(`Louisa: GitLab release created for tag ${tag}`);
-      return { ok: true, tag, action: "created" };
-    });
-
+    console.log(`Louisa: dispatched release Action for ${tag}`);
     await forceFlush();
-    return res.status(200).json(result);
+    return res.status(200).json({ ok: true, tag, action: "dispatched" });
   } catch (err) {
-    console.error("Louisa: error creating GitLab release", err);
+    console.error("Louisa: error dispatching release Action", err);
     await forceFlush();
     return res.status(500).json({ error: err.message });
+  }
+}
+
+/**
+ * Fire a repository_dispatch to the Louisa GitHub repo so the
+ * generate-release.yml Action takes over: summarize MRs, generate notes,
+ * create the GitLab release, and post notifications.
+ *
+ * Requires env vars:
+ *   LOUISA_GITHUB_REPO  — "owner/repo" of this repo, e.g. "arthur-ai/louisa"
+ *   GITHUB_TOKEN        — PAT with repo dispatch permission
+ */
+async function dispatchReleaseAction({ tag, projectId, scopeProjectId }) {
+  const repo  = process.env.LOUISA_GITHUB_REPO;
+  const token = process.env.GITHUB_TOKEN;
+  if (!repo || !token) {
+    throw new Error("LOUISA_GITHUB_REPO and GITHUB_TOKEN must be set to dispatch release Action");
+  }
+  const [owner, repoName] = repo.split("/");
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/dispatches`, {
+    method:  "POST",
+    headers: {
+      Authorization:  `Bearer ${token}`,
+      Accept:         "application/vnd.github.v3+json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      event_type:     "louisa-release",
+      client_payload: { tag, projectId, scopeProjectId: scopeProjectId || null },
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`GitHub dispatch failed: ${res.status} ${err}`);
   }
 }
 
