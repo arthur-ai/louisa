@@ -43,7 +43,7 @@ import {
 } from "../lib/gitlab.js";
 import { summarizePR } from "../lib/claude.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
-import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
+import { appendSummary, readSummariesForTag, readSummariesInRange } from "../lib/summaries.js";
 import { postReleaseNotification } from "../lib/slack.js";
 
 // ── Args ──────────────────────────────────────────────────────────────────────
@@ -111,8 +111,8 @@ async function summarizeProject(projId) {
   const mrs = await getMRsByDateRange(projId, from, to);
   console.log(`Louisa: project ${projId} — ${mrs.length} MRs in window`);
 
-  // Load whatever is already in the log so we skip re-summarizing
-  const alreadyDone = readSummariesInRange(String(projId), from, to) || [];
+  // Use tag-based lookup for idempotency — more reliable than date range
+  const alreadyDone = readSummariesForTag(String(projId), tag) || [];
   const doneKeys    = new Set(alreadyDone.map((e) => `${e.repo}:${e.number}`));
 
   for (const mr of mrs) {
@@ -151,6 +151,7 @@ async function summarizeProject(projId) {
         labels:     mr.labels || [],
         url:        mr.url,
         mergedAt:   mr.mergedAt || new Date().toISOString(),
+        tag,
       });
 
       console.log(`    → [${type}] ${summary.slice(0, 100)}`);
@@ -176,9 +177,9 @@ function summaryToMR(entry) {
   };
 }
 
-const backendMRs  = (readSummariesInRange(String(projectId), from, to) || []).map(summaryToMR);
+const backendMRs  = (readSummariesForTag(String(projectId), tag) || []).map(summaryToMR);
 const frontendMRs = scopeProjectId
-  ? (readSummariesInRange(String(scopeProjectId), from, to) || []).map(summaryToMR)
+  ? (readSummariesForTag(String(scopeProjectId), tag) || []).map(summaryToMR)
   : [];
 const mergeRequests = [...backendMRs, ...frontendMRs];
 console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
