@@ -1,6 +1,13 @@
 {
   "functions": {
-    "api/webhook.js": { "maxDuration": 60 },
-    "api/gitlab-webhook.js": { "maxDuration": 60 }
-  }
+    "api/webhook.js":        { "maxDuration": 60 },
+    "api/gitlab-webhook.js": { "maxDuration": 60 },
+    "api/release-status.js": { "maxDuration": 15 }
+  },
+  "crons": [
+    {
+      "path":     "/api/release-status",
+      "schedule": "*/4 * * * *"
+    }
+  ]
 }
