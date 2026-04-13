@@ -49,8 +49,6 @@ jobs:
           TAG:              ${{ github.event.client_payload.tag || github.event.inputs.tag }}
           PROJECT_ID:       ${{ github.event.client_payload.projectId || github.event.inputs.projectId || secrets.GITLAB_PROJECT_ID }}
           SCOPE_PROJECT_ID: ${{ github.event.client_payload.scopeProjectId || github.event.inputs.scopeProjectId }}
-          REMOTE_TRACE_ID:  ${{ github.event.client_payload.traceId }}
-          REMOTE_SPAN_ID:   ${{ github.event.client_payload.spanId }}
         run: |
           SCOPE_ARG=""
           if [ -n "$SCOPE_PROJECT_ID" ]; then
@@ -67,8 +65,4 @@ jobs:
           git config user.email "louisa-bot@users.noreply.github.com"
           git add logs/
           git diff --staged --quiet || git commit -m "chore: summaries log for ${{ github.event.client_payload.tag || github.event.inputs.tag }}"
-          for i in 1 2 3; do
-            git pull --rebase && git push && break
-            echo "Push attempt $i failed, retrying..."
-            sleep 5
-          done
+          git push

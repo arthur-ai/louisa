@@ -1,12 +1,11 @@
 import { verifyGitHubSignature } from "../lib/crypto.js";
 import {
-  getCommitsBetweenTags,
   getPRsByDateRange,
   getTagDate,
   getPreviousReleaseTag,
   getReleaseByTag,
-  createRelease,
   updateReleaseBody,
+  getCommitsBetweenTags,
   getPRCommits,
   getPRFiles,
   getPRComments,
@@ -16,6 +15,32 @@ import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
 import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
+
+async function dispatchGitHubReleaseAction({ tag, owner, repo }) {
+  const lRepo  = process.env.LOUISA_GITHUB_REPO;  // e.g. "arthur-ai/louisa"
+  const token  = process.env.GITHUB_TOKEN;
+  const [lOwner, lRepoName] = lRepo.split("/");
+
+  const res = await fetch(
+    `https://api.github.com/repos/${lOwner}/${lRepoName}/dispatches`,
+    {
+      method:  "POST",
+      headers: {
+        Authorization:        `Bearer ${token}`,
+        Accept:               "application/vnd.github.v3+json",
+        "Content-Type":       "application/json",
+      },
+      body: JSON.stringify({
+        event_type:     "louisa-github-release",
+        client_payload: { tag, owner, repo },
+      }),
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`dispatch failed (${res.status}): ${text}`);
+  }
+}
 
 export const config = { maxDuration: 60 };
 
@@ -40,7 +65,8 @@ export default async function handler(req, res) {
   // Initialise the OTel provider (+ Anthropic auto-instrumentation) once per container.
   const tracer = getTracer();
 
-  // ─── Tag push: generate and publish a new release ───────────────────────────
+  // ─── Tag push: dispatch GitHub Action to generate the release ───────────────
+  // (Generation runs in a GitHub Action to avoid the 60-second Vercel timeout)
   if (event === "create" && payload.ref_type === "tag") {
     const tag   = payload.ref;
     const owner = payload.repository.owner.login;
@@ -54,161 +80,18 @@ export default async function handler(req, res) {
     }
 
     try {
-      const result = await activeSpan(tracer, "louisa.github.release", {
-        "openinference.span.kind": "CHAIN",
-        "agent.name":              "Louisa",
-        "input.value":             JSON.stringify({ event: "tag_push", tag, repository: `${owner}/${repo}` }),
-        "input.mime_type":         "application/json",
-        "tag":                     tag,
-        "repository":              `${owner}/${repo}`,
-      }, async (rootSpan) => {
+      const existing = await getReleaseByTag(owner, repo, tag);
+      if (existing) {
+        console.log(`Louisa: release already exists for ${tag}, skipping`);
+        return res.status(200).json({ skipped: true, reason: "release already exists" });
+      }
 
-        const existing = await getReleaseByTag(owner, repo, tag);
-        if (existing) {
-          console.log(`Louisa: release already exists for ${tag}, skipping`);
-          rootSpan.setAttribute("output.value",     "skipped: release already exists");
-          rootSpan.setAttribute("output.mime_type", "text/plain");
-          return { skipped: true, reason: "release already exists" };
-        }
-
-        const previousTag = await activeSpan(tracer, "github.get_previous_tag", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPreviousReleaseTag",
-          "tool.description":        "Finds the most recent release tag before the given tag to determine the commit diff range",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", tag: "string" }),
-          "input.value":             JSON.stringify({ owner, repo, tag }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const r = await getPreviousReleaseTag(owner, repo, tag);
-          s.setAttribute("output.value",     r || "(none)");
-          s.setAttribute("output.mime_type", "text/plain");
-          return r;
-        });
-        console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
-
-        const commits = await activeSpan(tracer, "github.get_commits", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getCommitsBetweenTags",
-          "tool.description":        "Retrieves all commits between two tags to identify what changed in this release",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", base: "string", head: "string" }),
-          "input.value":             JSON.stringify({ owner, repo, base: previousTag, head: tag }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const r = await getCommitsBetweenTags(owner, repo, previousTag, tag);
-          s.setAttribute("output.value",     JSON.stringify(r.map(c => ({ sha: c.sha.slice(0, 7), message: c.message }))));
-          s.setAttribute("output.mime_type", "application/json");
-          return r;
-        });
-        console.log(`Louisa: found ${commits.length} commits`);
-
-        const [fromTagDate, toTagDate] = await Promise.all([
-          previousTag ? getTagDate(owner, repo, previousTag) : Promise.resolve(null),
-          getTagDate(owner, repo, tag),
-        ]);
-        const pullRequests = await activeSpan(tracer, "github.get_pull_requests", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "github.getPRsForRelease",
-          "tool.description":        "Resolves merged PRs for the release window — reads pre-computed summaries from log if available, falls back to GitHub Search API",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", fromDate: "string", toDate: "string" }),
-          "input.value":             JSON.stringify({ owner, repo, fromDate: fromTagDate, toDate: toTagDate }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          if (previousTag && !fromTagDate) {
-            console.warn(`Louisa: could not resolve date for previous tag ${previousTag} — skipping PR fetch to avoid epoch-range query`);
-            s.setAttribute("output.value",     "[]");
-            s.setAttribute("output.mime_type", "application/json");
-            return [];
-          }
-          const from = fromTagDate || new Date(0).toISOString();
-          const to   = toTagDate
-            ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
-            : new Date().toISOString();
-
-          // Try the local summaries log first — populated at PR merge time
-          const cached = readSummariesInRange(`${owner}/${repo}`, from, to);
-          if (cached !== null) {
-            console.log(`Louisa: using ${cached.length} pre-computed PR summaries from log`);
-            s.setAttribute("output.value",     JSON.stringify(cached.map(e => ({ number: e.number, title: e.title }))));
-            s.setAttribute("output.mime_type", "application/json");
-            return cached.map((entry) => ({
-              number: entry.number,
-              title:  entry.title,
-              body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
-              author: entry.author,
-              labels: entry.labels || [],
-              url:    entry.url,
-            }));
-          }
-
-          // Summaries log absent — fall back to live GitHub Search API
-          console.log(`Louisa: summaries log not found, fetching PRs from GitHub API`);
-          const r = await getPRsByDateRange(owner, repo, from, to);
-          s.setAttribute("output.value",     JSON.stringify(r.map(pr => ({ number: pr.number, title: pr.title }))));
-          s.setAttribute("output.mime_type", "application/json");
-          return r;
-        });
-        console.log(`Louisa: found ${pullRequests.length} merged PRs`);
-
-        // generateReleaseNotes() wraps messages.create() in an explicit LLM span
-        // (louisa.llm.generate_release_notes) with full OpenInference attributes.
-        const { text: notes } = await activeSpan(tracer, "louisa.generate_release_notes", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "louisa.generateReleaseNotes",
-          "tool.description":        "Calls Claude to write polished release notes from commits and pull requests",
-          "tool.parameters":         JSON.stringify({ tagName: "string", releaseName: "string", commits: "array", pullRequests: "array", previousTag: "string|null" }),
-          "input.value":             JSON.stringify({ tagName: tag, releaseName: tag, commitCount: commits.length, prCount: pullRequests.length, previousTag }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const result = await generateReleaseNotes({ tagName: tag, releaseName: tag, commits, pullRequests, previousTag });
-          s.setAttribute("output.value",             result.text.slice(0, 1000));
-          s.setAttribute("output.mime_type",         "text/markdown");
-          s.setAttribute("llm.token_count.prompt",   result.usage.inputTokens);
-          s.setAttribute("llm.token_count.completion", result.usage.outputTokens);
-          s.setAttribute("llm.token_count.total",    result.usage.totalTokens);
-          s.setAttribute("llm.token_count.cache_read",  result.usage.cacheReadTokens);
-          s.setAttribute("llm.token_count.cache_write", result.usage.cacheWriteTokens);
-          return result;
-        });
-
-        const footer  = "\n\n---\n_Release notes generated by Louisa_";
-        const created = await activeSpan(tracer, "github.create_release", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "github.createRelease",
-          "tool.description":        "Publishes the AI-generated release notes as a GitHub Release for the tag",
-          "tool.parameters":         JSON.stringify({ owner: "string", repo: "string", tag: "string", name: "string", body: "string" }),
-          "input.value":             JSON.stringify({ owner, repo, tag }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const r = await createRelease(owner, repo, tag, tag, notes + footer);
-          s.setAttribute("output.value",     r.html_url || "");
-          s.setAttribute("output.mime_type", "text/plain");
-          return r;
-        });
-
-        const releaseUrl = created.html_url;
-        await activeSpan(tracer, "slack.post_notification", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "notifications.postReleaseNotification",
-          "tool.description":        "Posts a release notification to configured channels (Slack and/or Teams) via Incoming Webhook",
-          "tool.parameters":         JSON.stringify({ tag: "string", releaseUrl: "string", notes: "string" }),
-          "input.value":             JSON.stringify({ tag, releaseUrl }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          await postReleaseNotification(tag, releaseUrl, notes);
-          s.setAttribute("output.value",     "notification sent");
-          s.setAttribute("output.mime_type", "text/plain");
-        });
-
-        rootSpan.setAttribute("output.value",     releaseUrl);
-        rootSpan.setAttribute("output.mime_type", "text/plain");
-        console.log(`Louisa: release created for tag ${tag}`);
-        return { ok: true, tag, action: "created" };
-      });
-
+      await dispatchGitHubReleaseAction({ tag, owner, repo });
+      console.log(`Louisa: dispatched louisa-github-release action for ${tag}`);
       await forceFlush();
-      return res.status(200).json(result);
+      return res.status(200).json({ ok: true, tag, action: "dispatched" });
     } catch (err) {
-      console.error("Louisa: error creating release from tag", err);
+      console.error("Louisa: error dispatching release action", err);
       await forceFlush();
       return res.status(500).json({ error: err.message });
     }
@@ -326,24 +209,8 @@ export default async function handler(req, res) {
         });
         console.log(`Louisa: found ${pullRequests.length} merged PRs`);
 
-        const { text: notes } = await activeSpan(tracer, "louisa.generate_release_notes", {
-          "openinference.span.kind": "TOOL",
-          "tool.name":               "louisa.generateReleaseNotes",
-          "tool.description":        "Calls Claude to write polished release notes from commits and pull requests",
-          "tool.parameters":         JSON.stringify({ tagName: "string", releaseName: "string", commits: "array", pullRequests: "array", previousTag: "string|null" }),
-          "input.value":             JSON.stringify({ tagName: tag, releaseName: release.name || tag, commitCount: commits.length, prCount: pullRequests.length, previousTag }),
-          "input.mime_type":         "application/json",
-        }, async (s) => {
-          const result = await generateReleaseNotes({ tagName: tag, releaseName: release.name || tag, commits, pullRequests, previousTag });
-          s.setAttribute("output.value",               result.text.slice(0, 1000));
-          s.setAttribute("output.mime_type",           "text/markdown");
-          s.setAttribute("llm.token_count.prompt",     result.usage.inputTokens);
-          s.setAttribute("llm.token_count.completion", result.usage.outputTokens);
-          s.setAttribute("llm.token_count.total",      result.usage.totalTokens);
-          s.setAttribute("llm.token_count.cache_read",  result.usage.cacheReadTokens);
-          s.setAttribute("llm.token_count.cache_write", result.usage.cacheWriteTokens);
-          return result;
-        });
+        // AnthropicInstrumentation auto-creates an LLM span as a child of rootSpan.
+        const { text: notes } = await generateReleaseNotes({ tagName: tag, releaseName: release.name || tag, commits, pullRequests, previousTag });
 
         const footer = "\n\n---\n_Release notes generated by Louisa_";
         await activeSpan(tracer, "github.update_release", {

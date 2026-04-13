@@ -1,0 +1,17 @@
+name: Reset repository homepage
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  reset-homepage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set homepage to canonical GitHub URL
+        run: |
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }} \
+            -d '{"homepage":"https://github.com/arthur-ai/louisa"}'
