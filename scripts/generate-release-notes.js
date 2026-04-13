@@ -85,7 +85,7 @@ function buildParentContext() {
   return trace.setSpanContext(context.active(), spanContext);
 }
 
-await context.with(buildParentContext(), async () => {
+try { await context.with(buildParentContext(), async () => {
   await activeSpan(tracer, "louisa.gitlab.release.action", {
     "openinference.span.kind": "CHAIN",
     "agent.name":              "Louisa",
@@ -324,6 +324,4 @@ await context.with(buildParentContext(), async () => {
     rootSpan.setAttribute("output.value",     tag);
     rootSpan.setAttribute("output.mime_type", "text/plain");
   });
-});
-
-await forceFlush();
+}); } finally { await forceFlush(); }
