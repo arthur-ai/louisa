@@ -1,0 +1,65 @@
+name: Generate GitHub Release Notes
+
+# Triggered by api/webhook.js when a production GitHub (arthur-engine) tag is pushed.
+# Runs summarization + release note generation with no 60-second time constraint,
+# then commits the updated summaries log back to the repo for future releases.
+
+on:
+  repository_dispatch:
+    types: [louisa-github-release]
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: "GitHub repo owner (e.g. arthur-ai)"
+        required: true
+        default: "arthur-ai"
+      repo:
+        description: "GitHub repo name (e.g. arthur-engine)"
+        required: true
+        default: "arthur-engine"
+      tag:
+        description: "Tag to generate release notes for (e.g. 2.1.516)"
+        required: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to commit the updated logs/pr-summaries.jsonl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Summarize PRs and generate release notes
+        env:
+          GITHUB_TOKEN:      ${{ secrets.LOUISA_GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ARTHUR_BASE_URL:   ${{ secrets.ARTHUR_BASE_URL }}
+          ARTHUR_API_KEY:    ${{ secrets.ARTHUR_API_KEY }}
+          ARTHUR_TASK_ID:    ${{ secrets.ARTHUR_TASK_ID }}
+          OWNER: ${{ github.event.client_payload.owner || github.event.inputs.owner }}
+          REPO:  ${{ github.event.client_payload.repo  || github.event.inputs.repo  }}
+          TAG:   ${{ github.event.client_payload.tag   || github.event.inputs.tag   }}
+        run: |
+          node scripts/generate-github-release.js \
+            --owner "$OWNER" \
+            --repo  "$REPO"  \
+            --tag   "$TAG"
+
+      - name: Commit updated summaries log
+        run: |
+          git config user.name "louisa-bot"
+          git config user.email "louisa-bot@users.noreply.github.com"
+          git add logs/
+          git diff --staged --quiet || git commit -m "chore: summaries log for ${{ github.event.client_payload.tag || github.event.inputs.tag }}"
+          git push
