@@ -49,6 +49,8 @@ jobs:
           TAG:              ${{ github.event.client_payload.tag || github.event.inputs.tag }}
           PROJECT_ID:       ${{ github.event.client_payload.projectId || github.event.inputs.projectId || secrets.GITLAB_PROJECT_ID }}
           SCOPE_PROJECT_ID: ${{ github.event.client_payload.scopeProjectId || github.event.inputs.scopeProjectId }}
+          REMOTE_TRACE_ID:  ${{ github.event.client_payload.traceId }}
+          REMOTE_SPAN_ID:   ${{ github.event.client_payload.spanId }}
         run: |
           SCOPE_ARG=""
           if [ -n "$SCOPE_PROJECT_ID" ]; then
