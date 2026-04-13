@@ -8,6 +8,7 @@ import { summarizePR } from "../lib/claude.js";
 import { appendSummary } from "../lib/summaries.js";
 import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
+import { trace } from "@opentelemetry/api";
 
 export const config = { maxDuration: 60 };
 
@@ -65,21 +66,54 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Quick idempotency check — if the release already exists, no need to trigger the Action.
-    const existing = await getReleaseByTag(projectId, tag);
-    if (existing) {
-      console.log(`Louisa: GitLab release already exists for ${tag}, skipping`);
-      return res.status(200).json({ skipped: true, reason: "release already exists" });
-    }
+    const result = await activeSpan(tracer, "louisa.gitlab.release", {
+      "openinference.span.kind": "CHAIN",
+      "agent.name":              "Louisa",
+      "input.value":             JSON.stringify({ event: "tag_push", tag, projectId: String(projectId) }),
+      "input.mime_type":         "application/json",
+      "tag":                     tag,
+      "project_id":              String(projectId),
+    }, async (rootSpan) => {
 
-    // Dispatch the GitHub Action which will: summarize MRs → generate notes → create release → notify.
-    const rawScopeId     = process.env.GITLAB_SCOPE_PROJECT_ID;
-    const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
-    await dispatchReleaseAction({ tag, projectId: String(projectId), scopeProjectId });
+      // Quick idempotency check — if the release already exists, no need to trigger the Action.
+      const existing = await getReleaseByTag(projectId, tag);
+      if (existing) {
+        console.log(`Louisa: GitLab release already exists for ${tag}, skipping`);
+        rootSpan.setAttribute("output.value",     "skipped: release already exists");
+        rootSpan.setAttribute("output.mime_type", "text/plain");
+        return { skipped: true, reason: "release already exists" };
+      }
 
-    console.log(`Louisa: dispatched release Action for ${tag}`);
+      // Dispatch the GitHub Action which will: summarize MRs → generate notes → create release → notify.
+      const rawScopeId     = process.env.GITLAB_SCOPE_PROJECT_ID;
+      const scopeProjectId = rawScopeId && rawScopeId !== String(projectId) ? rawScopeId : null;
+
+      await activeSpan(tracer, "louisa.dispatch_release_action", {
+        "openinference.span.kind": "TOOL",
+        "tool.name":               "github.dispatchReleaseAction",
+        "tool.description":        "Fires a repository_dispatch event to the Louisa GitHub repo so the generate-release.yml Action handles MR summarisation, release note generation, and notifications",
+        "tool.parameters":         JSON.stringify({ tag: "string", projectId: "string", scopeProjectId: "string|null" }),
+        "input.value":             JSON.stringify({ tag, projectId: String(projectId), scopeProjectId }),
+        "input.mime_type":         "application/json",
+        "tag":                     tag,
+        "project_id":              String(projectId),
+      }, async (s) => {
+        // Pass the current span context so the GitHub Action can parent its
+        // root span under this dispatch span, linking the two traces.
+        const spanCtx = s.spanContext();
+        await dispatchReleaseAction({ tag, projectId: String(projectId), scopeProjectId, traceId: spanCtx.traceId, spanId: spanCtx.spanId });
+        s.setAttribute("output.value",     "dispatched");
+        s.setAttribute("output.mime_type", "text/plain");
+      });
+
+      console.log(`Louisa: dispatched release Action for ${tag}`);
+      rootSpan.setAttribute("output.value",     "dispatched");
+      rootSpan.setAttribute("output.mime_type", "text/plain");
+      return { ok: true, tag, action: "dispatched" };
+    });
+
     await forceFlush();
-    return res.status(200).json({ ok: true, tag, action: "dispatched" });
+    return res.status(200).json(result);
   } catch (err) {
     console.error("Louisa: error dispatching release Action", err);
     await forceFlush();
@@ -96,7 +130,7 @@ export default async function handler(req, res) {
  *   LOUISA_GITHUB_REPO  — "owner/repo" of this repo, e.g. "arthur-ai/louisa"
  *   GITHUB_TOKEN        — PAT with repo dispatch permission
  */
-async function dispatchReleaseAction({ tag, projectId, scopeProjectId }) {
+async function dispatchReleaseAction({ tag, projectId, scopeProjectId, traceId, spanId }) {
   const repo  = process.env.LOUISA_GITHUB_REPO;
   const token = process.env.GITHUB_TOKEN;
   if (!repo || !token) {
@@ -112,7 +146,7 @@ async function dispatchReleaseAction({ tag, projectId, scopeProjectId }) {
     },
     body: JSON.stringify({
       event_type:     "louisa-release",
-      client_payload: { tag, projectId, scopeProjectId: scopeProjectId || null },
+      client_payload: { tag, projectId, scopeProjectId: scopeProjectId || null, traceId: traceId || null, spanId: spanId || null },
     }),
   });
   if (!res.ok) {
