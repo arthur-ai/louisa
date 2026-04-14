@@ -18,28 +18,38 @@ Works with **GitHub**, **GitLab**, or **both simultaneously**. Use whichever fit
 PR/MR merged on GitHub or GitLab
         │
         ▼
-Webhook fires ──► Vercel serverless function
+Webhook fires ──► Vercel serverless function (fast path, < 5s)
         │
         ├─► Verifies webhook signature
         ├─► Fetches PR/MR title, description, commits, changed files, and review comments
-        ├─► Calls Claude to rewrite the description into a structured schema
-        │       (Summary / Problem / Solution / User Impact / Changed Areas / Type / Breaking Changes)
-        └─► Writes enriched title + description back to the PR/MR on GitHub or GitLab
+        ├─► Calls Claude Haiku to generate a compact structured summary
+        │       (summary / type / user impact)
+        ├─► Appends summary to logs/pr-summaries.jsonl
+        └─► Rewrites the PR/MR description with a structured enrichment schema
+                (Summary / Problem / Solution / User Impact / Changed Areas / Type / Breaking Changes)
 
 ─────────────────────────────────────────────────────────────────
 
 Tag pushed to GitHub or GitLab
         │
         ▼
-Webhook fires ──► Vercel serverless function
+Webhook fires ──► Vercel serverless function (thin dispatcher, < 5s)
         │
         ├─► Verifies webhook signature
-        ├─► Fetches commits between this tag and the previous release
-        ├─► Fetches merged PRs/MRs — now with enriched, structured descriptions
-        ├─► Calls Claude via the Anthropic SDK to generate release notes
+        ├─► Checks if release already exists (idempotency)
+        └─► Dispatches repository_dispatch event to GitHub Actions
+
+                ▼
+
+        GitHub Action picks up the event (no time limit)
+        │
+        ├─► Reads pre-computed PR/MR summaries from logs/pr-summaries.jsonl
+        ├─► Summarizes any PRs/MRs not yet in the log (using Claude Haiku)
+        ├─► Calls Claude Opus to generate polished release notes from the summaries
         ├─► Creates a published Release with formatted notes
         ├─► Posts a summary to Slack and/or Teams (optional)
         │       └─► Logs release metadata to ./logs/ for monthly blog drafting
+        ├─► Commits updated logs/pr-summaries.jsonl back to the repo
         └─► Sends full OpenInference traces to Arthur Engine (optional)
 
 ─────────────────────────────────────────────────────────────────
@@ -63,9 +73,36 @@ On the 28th of each month — Changelog Publishing:
 
 Louisa handles multiple scenarios:
 
-- **PR/MR merged (GitHub or GitLab)** — Louisa enriches the PR/MR description in place with structured context, improving the signal available for release notes and blog content downstream.
-- **Tag push (GitHub or GitLab)** — Automatically creates a published release with generated notes. No one needs to touch the Releases page manually.
+- **PR/MR merged (GitHub or GitLab)** — Louisa summarizes the PR/MR into a compact log entry and enriches the description in place. Both happen in a single fast webhook call.
+- **Tag push (GitHub or GitLab)** — The webhook immediately dispatches a GitHub Action. The Action generates release notes without any time limit, using pre-computed summaries to keep prompts lean.
 - **Manual release (GitHub)** — If someone creates a release by hand, Louisa detects it and fills in the release notes if they're empty.
+
+---
+
+## Why GitHub Actions for Release Generation?
+
+Vercel serverless functions have a **60-second maximum execution time**. For a release window covering many PRs, fetching context and calling Claude can easily exceed this — causing silent failures where the webhook fires but no release appears.
+
+Louisa solves this by splitting the work:
+
+| Step | Where | Why |
+|------|-------|-----|
+| Webhook validation + idempotency check | Vercel (< 2s) | Needs to respond to GitHub/GitLab quickly |
+| PR/MR summarization at merge time | Vercel (< 10s) | One PR at a time — always fast |
+| Release note generation | GitHub Action (no limit) | May need to summarize dozens of PRs + call Opus |
+
+The GitHub Action also commits `logs/pr-summaries.jsonl` back to the repo after each run, so summaries accumulate over time and future releases skip PRs that are already in the log.
+
+---
+
+## Two-Model Strategy
+
+| Task | Model | Why |
+|------|-------|-----|
+| Per-PR/MR summarization | `claude-haiku-4-5` | ~10× faster and cheaper; output is 2-3 sentences |
+| Release notes generation | `claude-opus-4-6` | Richer synthesis; runs once per tag in a GitHub Action |
+
+Haiku also uses [tool use](https://docs.anthropic.com/en/docs/tool-use) with a strict schema — this guarantees structured JSON output without needing to parse free-form text or strip markdown code fences.
 
 ---
 
@@ -89,7 +126,7 @@ Each enriched description follows this schema:
 
 The enriched content is written back to the PR/MR on GitHub or GitLab. An invisible marker prevents re-enrichment if the webhook fires more than once.
 
-This gives every downstream step — release notes, blog drafts, changelogs — substantially richer signal without requiring developers to change how they write PRs.
+Simultaneously, a compact structured summary (2-3 sentences + type + user impact) is appended to `logs/pr-summaries.jsonl` — a persistent log that release note generation reads instead of re-analysing every PR from scratch.
 
 ### Core: Automatic release notes
 
@@ -117,9 +154,11 @@ These pipelines are **entirely optional** — they have no effect on Louisa's co
 | Feature | GitHub | GitLab |
 |---------|--------|--------|
 | PR/MR enrichment on merge | ✅ | ✅ |
-| Tag push → auto-create release | ✅ | ✅ |
+| Per-PR/MR summary log | ✅ | ✅ |
+| Tag push → GitHub Action dispatch | ✅ | ✅ |
 | Manual release → fill in notes | ✅ | — |
 | Commit & PR/MR analysis | ✅ | ✅ |
+| Dual-repo support (frontend + backend) | — | ✅ |
 | Slack notifications | ✅ | ✅ |
 | Teams notifications | ✅ | ✅ |
 | Arthur Engine tracing | ✅ | ✅ |
@@ -141,7 +180,7 @@ louisa.github.release  [CHAIN]
 ├── github.get_previous_tag       [TOOL]   → "v1.4.2"
 ├── github.get_commits            [TOOL]   → 14 commits
 ├── github.get_pull_requests      [TOOL]   → 6 merged PRs
-├── anthropic.messages.create     [LLM]    → claude-sonnet-4-20250514
+├── anthropic.messages.create     [LLM]    → claude-opus-4-6
 │       input tokens: 3,847  output tokens: 812
 │       system prompt, user message, full assistant response
 ├── github.create_release         [TOOL]   → https://github.com/…/releases/tag/v1.5.0
@@ -181,6 +220,9 @@ Instrumentation uses the official [`@arizeai/openinference-instrumentation-anthr
 - Maintainer access to the project (to configure the webhook)
 - The GitLab project ID (found under project Settings → General, or via the Actions menu on the project page)
 
+**For GitHub Actions (both pipelines):**
+- The Louisa repo itself must have a `LOUISA_GITHUB_TOKEN` secret — a GitHub PAT with write access to the target repos (same token as `GITHUB_TOKEN` in Vercel). This is needed because the built-in `GITHUB_TOKEN` in Actions only has access to the Louisa repo itself, not to `arthur-engine` or other target repos.
+
 **Optional:**
 - A [Slack](https://slack.com) workspace with an Incoming Webhook URL (for release notifications)
 - A [Microsoft Teams](https://teams.microsoft.com) channel with an Incoming Webhook URL (for release notifications)
@@ -207,7 +249,7 @@ Create a `.env.local` file in the project root. Include only the variables for t
 ANTHROPIC_API_KEY=sk-ant-your_anthropic_key
 
 # ── GitHub (include if using GitHub) ──
-GITHUB_TOKEN=ghp_your_github_token
+GITHUB_TOKEN=github_pat_your_github_token
 GITHUB_WEBHOOK_SECRET=your_github_webhook_secret
 GITHUB_REPO_OWNER=your-org
 GITHUB_REPO_NAME=your-repo
@@ -216,6 +258,10 @@ GITHUB_REPO_NAME=your-repo
 GITLAB_TOKEN=glpat-your_gitlab_token
 GITLAB_WEBHOOK_SECRET=your_gitlab_webhook_secret
 GITLAB_PROJECT_ID=12345678
+GITLAB_PROD_TAG_SUFFIX=-success-aws-prod-platform  # suffix that identifies production tags
+
+# ── Louisa self-reference (required for GitHub Action dispatch) ──
+LOUISA_GITHUB_REPO=your-org/louisa  # e.g. arthur-ai/louisa
 
 # ── Slack (optional) ──
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../xxx
@@ -248,6 +294,9 @@ openssl rand -hex 32
 - **Scope:** `api`
 - Create at GitLab → User Settings → Access Tokens
 
+**`LOUISA_GITHUB_REPO`:**
+Set this to the `owner/repo` of the Louisa repo itself (e.g. `arthur-ai/louisa`). Vercel uses it to dispatch `repository_dispatch` events to GitHub Actions when a tag is pushed.
+
 **Anthropic API Key:**
 - Create one at [console.anthropic.com](https://console.anthropic.com)
 
@@ -272,16 +321,32 @@ openssl rand -hex 32
 
 You can configure Slack only, Teams only, or both simultaneously — Louisa posts to whichever are set.
 
-### 3. Deploy to Vercel
+### 3. Add GitHub Actions secrets
+
+In the Louisa repo, go to **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret | Value |
+|--------|-------|
+| `LOUISA_GITHUB_TOKEN` | The same PAT as `GITHUB_TOKEN` in Vercel — needs write access to target repos |
+| `ANTHROPIC_API_KEY` | Your Anthropic API key |
+| `GITLAB_TOKEN` | Your GitLab PAT (if using GitLab pipeline) |
+| `GITLAB_PROD_TAG_SUFFIX` | Your GitLab prod tag suffix (if using GitLab pipeline) |
+| `SLACK_WEBHOOK_URL` | Optional — for release notifications |
+| `TEAMS_WEBHOOK_URL` | Optional — for release notifications |
+| `ARTHUR_BASE_URL` | Optional — for tracing |
+| `ARTHUR_API_KEY` | Optional — for tracing |
+| `ARTHUR_TASK_ID` | Optional — for tracing |
+
+### 4. Deploy to Vercel
 
 ```bash
 vercel link
 vercel --prod
 ```
 
-Then add the same environment variables in the Vercel dashboard under **Project → Settings → Environment Variables**.
+Then add the same environment variables in the Vercel dashboard under **Project → Settings → Environment Variables**. Env var changes take effect on the next deployment.
 
-### 4. Configure webhooks
+### 5. Configure webhooks
 
 Set up webhooks on each repo you want Louisa to monitor. You can configure one or both.
 
@@ -294,7 +359,7 @@ On your GitHub repo, go to **Settings → Webhooks → Add webhook**:
 4. **Events:** Select "Let me select individual events" and check:
    - **Branch or tag creation** (triggers release creation on tag push)
    - **Releases** (triggers note generation on manual releases)
-   - **Pull requests** (triggers PR enrichment on merge)
+   - **Pull requests** (triggers PR summarization and enrichment on merge)
 
 **GitLab webhook:**
 
@@ -303,7 +368,9 @@ On your GitLab project, go to **Settings → Webhooks → Add new webhook**:
 2. **Secret token:** the same value as `GITLAB_WEBHOOK_SECRET`
 3. **Triggers:** Check the following events:
    - **Tag push events** (triggers release note generation)
-   - **Merge request events** (triggers MR enrichment on merge)
+   - **Merge request events** (triggers MR summarization and enrichment on merge)
+
+> **Important:** Both "Tag push events" and "Merge request events" must be enabled on the GitLab webhook. Merge request events fire the per-MR summarization that populates `logs/pr-summaries.jsonl` — without it, every tag push will need to re-summarize all MRs from scratch.
 
 ---
 
@@ -312,27 +379,35 @@ On your GitLab project, go to **Settings → Webhooks → Add new webhook**:
 ```
 louisa/
 ├── api/
-│   ├── webhook.js            # GitHub webhook handler
-│   └── gitlab-webhook.js     # GitLab webhook handler
+│   ├── webhook.js            # GitHub webhook handler (dispatches to GitHub Action on tag push)
+│   ├── gitlab-webhook.js     # GitLab webhook handler (dispatches to GitHub Action on tag push)
+│   └── release-status.js     # Vercel cron — polls in-progress GitHub Action runs every 4 min
 ├── lib/
 │   ├── otel.js                # OpenTelemetry + OpenInference tracing setup
 │   ├── github.js              # GitHub API client (commits, PRs, releases, enrichment)
 │   ├── gitlab.js              # GitLab API client (commits, MRs, releases, enrichment)
 │   ├── enrich.js              # PR/MR context enrichment — Claude prompt + idempotency guard
-│   ├── claude.js              # Anthropic SDK client for GitHub release notes
-│   ├── claude-platform.js     # Anthropic SDK client for GitLab release notes
+│   ├── claude.js              # summarizePR (Haiku + tool use) + generateReleaseNotes (Opus)
+│   ├── claude-platform.js     # generatePlatformReleaseNotes (Opus) — GitLab product prompt
+│   ├── summaries.js           # Read/write helpers for logs/pr-summaries.jsonl
 │   ├── slack.js               # Slack Incoming Webhook client + monthly release logger
 │   └── crypto.js              # GitHub webhook signature verification
 ├── scripts/
-│   ├── backfill-enrich.js     # Retroactively enrich PRs merged since the last release
-│   ├── backfill-log.js        # Seed monthly log from existing GitHub/GitLab releases
-│   ├── draft-blog.js          # [optional] Generate monthly blog post from release logs
-│   └── publish-changelog.js   # [optional] Publish combined monthly changelog to readme.io
+│   ├── generate-github-release.js  # Full GitHub pipeline (summarize + generate + create release)
+│   ├── generate-release-notes.js   # Full GitLab pipeline (summarize + generate + create release)
+│   ├── backfill-releases.js        # Scan for missing releases; run generate script per tag
+│   ├── backfill-enrich.js          # Retroactively enrich PRs merged since the last release
+│   ├── backfill-log.js             # Seed monthly log from existing GitHub/GitLab releases
+│   ├── draft-blog.js               # [optional] Generate monthly blog post from release logs
+│   └── publish-changelog.js        # [optional] Publish combined monthly changelog to readme.io
 ├── .github/
 │   └── workflows/
-│       ├── draft-blog.yml          # [optional] Auto-drafts blog post on the 24th of each month
-│       └── publish-changelog.yml   # [optional] Auto-publishes changelog to readme.io on the 28th
-├── logs/                      # Monthly release logs — gitignored, created at runtime
+│       ├── generate-github-release.yml  # Triggered by GitHub tag push → creates GitHub release
+│       ├── generate-release.yml         # Triggered by GitLab tag push → creates GitLab release
+│       ├── draft-blog.yml               # [optional] Auto-drafts blog post on the 24th
+│       └── publish-changelog.yml        # [optional] Auto-publishes changelog on the 28th
+├── logs/
+│   └── pr-summaries.jsonl     # Persistent per-PR/MR summaries log — committed to repo
 ├── output/                    # Generated blog drafts — gitignored, created at runtime
 ├── package.json
 ├── vercel.json
@@ -345,20 +420,44 @@ louisa/
 
 | Component | Purpose |
 |-----------|---------|
-| `api/webhook.js` | Receives GitHub webhooks, routes tag, release, and pull_request merge events, orchestrates the GitHub pipeline |
-| `api/gitlab-webhook.js` | Receives GitLab webhooks, handles tag push and merge_request merge events, orchestrates the GitLab pipeline |
+| `api/webhook.js` | Receives GitHub webhooks; dispatches GitHub Action on tag push; runs PR summarization + enrichment inline on merge |
+| `api/gitlab-webhook.js` | Receives GitLab webhooks; dispatches GitHub Action on tag push; runs MR enrichment inline on merge |
+| `api/release-status.js` | Vercel cron (every 4 min) — polls GitHub Actions API for in-progress release runs and logs step-level status |
+| `lib/summaries.js` | Read/write helpers for `logs/pr-summaries.jsonl` — `appendSummary`, `readSummariesInRange`, `readSummariesForTag` |
 | `lib/enrich.js` | Core enrichment logic — builds the Claude prompt from full PR/MR context, enforces the structured schema, guards against re-enrichment with an idempotency marker |
 | `lib/otel.js` | Lazy-initialises the OpenTelemetry provider, patches the Anthropic SDK for auto-instrumentation, exports `getTracer`, `forceFlush`, and `activeSpan` |
 | `lib/crypto.js` | Verifies GitHub webhook authenticity using HMAC-SHA256 with timing-safe comparison |
 | `lib/github.js` | Compares tags, fetches commits/files/comments, resolves merged PRs, creates and updates GitHub releases, writes enriched PR descriptions |
 | `lib/gitlab.js` | Compares tags, fetches commits/changes/notes, resolves merged MRs, creates GitLab releases, writes enriched MR descriptions |
-| `lib/claude.js` | Anthropic SDK client with the Claude prompt tailored for GitHub product release notes |
-| `lib/claude-platform.js` | Anthropic SDK client with the Claude prompt tailored for GitLab product release notes |
-| `lib/slack.js` | Posts release notifications to Slack and/or Teams via `postReleaseNotification`; logs structured release metadata to `./logs/releases-{month}.json.lines` after each successful dispatch |
-| `scripts/backfill-enrich.js` | Retroactively enriches all PRs merged since the last release — dry-run by default, `--write` to apply |
-| `scripts/backfill-log.js` | *(optional pipeline)* Fetches published release note bodies from GitHub and GitLab APIs and writes structured log entries — no Claude calls, safe to re-run, deduplicates by tag |
-| `scripts/draft-blog.js` | *(optional pipeline)* Reads monthly release log entries and calls Claude to draft a "What's New" blog post |
-| `scripts/publish-changelog.js` | *(optional pipeline)* Reads monthly release logs, calls Claude to synthesize a combined changelog, creates or updates the entry on readme.io, and posts a Slack/Teams notification |
+| `lib/claude.js` | `summarizePR` (Haiku + tool use, structured JSON output) and `generateReleaseNotes` (Opus, GitHub product prompt) |
+| `lib/claude-platform.js` | `generatePlatformReleaseNotes` (Opus, GitLab product prompt) |
+| `lib/slack.js` | Posts release notifications to Slack and/or Teams; logs structured release metadata for the monthly pipelines |
+| `scripts/generate-github-release.js` | Called by the GitHub Action — summarizes PRs not yet in log, generates release notes, creates the GitHub release |
+| `scripts/generate-release-notes.js` | Called by the GitHub Action — summarizes MRs not yet in log, generates release notes, creates the GitLab release |
+| `scripts/backfill-releases.js` | Scans for tags with no release; runs the generate script sequentially per missing tag (dry-run by default) |
+
+### Summaries log
+
+`logs/pr-summaries.jsonl` is a newline-delimited JSON file committed to the repo. Each line is one PR/MR summary:
+
+```json
+{
+  "platform": "github",
+  "repo": "arthur-ai/arthur-engine",
+  "number": 1234,
+  "title": "Add timezone preferences to user settings",
+  "summary": "Adds per-user timezone and time format preferences...",
+  "type": "Feature",
+  "userImpact": "Users can now see all timestamps in their local timezone.",
+  "author": "jsmith",
+  "labels": ["feature"],
+  "url": "https://github.com/...",
+  "mergedAt": "2026-04-10T14:22:00Z",
+  "tag": "2.1.516"
+}
+```
+
+When a tag push triggers the GitHub Action, it reads this file first. Any PRs/MRs already summarized are skipped — only new ones are sent to Claude. This keeps prompts lean and generation fast regardless of how many total PRs exist in the repo.
 
 ### Tracing architecture
 
@@ -369,6 +468,71 @@ louisa/
 3. Registers the provider as the global OTel tracer
 
 The webhook handlers wrap each logical step in an `activeSpan()` call (CHAIN for the overall pipeline, TOOL for each API call). Because OTel context propagation uses `AsyncLocalStorage`, when `generateReleaseNotes()` calls `client.messages.create()` inside an active CHAIN span, the auto-instrumented LLM span is automatically nested as a child — no manual wiring required.
+
+---
+
+## Running Locally
+
+```bash
+npm install
+vercel dev   # serves api/ as serverless functions at localhost:3000
+```
+
+Load env vars before running scripts:
+
+```bash
+set -a && source .env.local && set +a
+```
+
+Key scripts:
+
+```bash
+# Check which GitLab tags are missing releases (dry-run)
+node scripts/backfill-releases.js
+
+# Run the full pipeline for a specific GitLab tag
+node scripts/generate-release-notes.js \
+  --tag 1.4.1987-success-aws-prod-platform \
+  --project-id 48008591
+
+# Run the full pipeline for a specific GitHub tag
+node scripts/generate-github-release.js \
+  --owner arthur-ai \
+  --repo arthur-engine \
+  --tag 2.1.516
+
+# Verify tag sort logic (GitLab)
+node scripts/list-prod-tags.js
+
+# Unit-test tag sort algorithm (no API calls)
+node scripts/test-tag-sort.js
+
+# Retroactively enrich PRs (dry-run)
+node scripts/backfill-enrich.js
+
+# Retroactively enrich PRs (write)
+node scripts/backfill-enrich.js --write
+```
+
+---
+
+## Backfilling Missed Releases
+
+If a release was skipped (e.g. due to a timeout before the GitHub Action migration), use the backfill script to identify gaps and re-run the pipeline:
+
+```bash
+set -a && source .env.local && set +a
+
+# List missing GitLab releases (dry-run)
+node scripts/backfill-releases.js
+
+# Run generate for all missing tags (oldest-first)
+node scripts/backfill-releases.js --run
+```
+
+For individual tags, you can also trigger from the GitHub Actions UI:
+- **GitLab tag:** Actions → **Generate Release Notes** → Run workflow → enter tag
+- **GitHub tag:** Actions → **Generate GitHub Release Notes** → Run workflow → enter owner, repo, tag
 
 ---
 
@@ -438,10 +602,6 @@ node scripts/backfill-enrich.js --write --owner my-org --repo my-repo
 ```
 
 The script skips PRs that are already enriched (idempotent — safe to re-run).
-
-### Webhook requirement
-
-The GitHub webhook on your target repo must have the **Pull requests** event enabled. GitLab webhook trigger events don't need any changes — merge request events are already included in the default trigger set.
 
 ---
 
@@ -514,8 +674,8 @@ You can also trigger it manually from the **Actions** tab with an optional month
 
 Each product has its own Claude prompt, so you can customize them independently:
 
-- **GitHub product:** Edit the `systemPrompt` in `lib/claude.js`
-- **GitLab product:** Edit the `systemPrompt` in `lib/claude-platform.js`
+- **GitHub product:** Edit the `systemPrompt` in `lib/claude.js` → `generateReleaseNotes`
+- **GitLab product:** Edit the `systemPrompt` in `lib/claude-platform.js` → `generatePlatformReleaseNotes`
 
 You can customize:
 
@@ -524,52 +684,23 @@ You can customize:
 - **Structure** — Modify the heading format, section dividers, summary paragraphs, etc.
 - **Filtering** — Control which types of changes are included or excluded
 
----
-
-## Adding Another Repo
-
-To add Louisa to a new repo:
-
-**For a GitHub repo:**
-1. Ensure the `GITHUB_TOKEN` has access to the new repo
-2. Add a webhook on the new repo pointing to `/api/webhook` with the same secret
-3. Louisa uses the webhook payload to identify the repo, so no code changes are needed
-
-**For a GitLab project:**
-1. Create a new GitLab token (or ensure the existing one has access)
-2. Add the `GITLAB_PROJECT_ID` for the new project (or update the webhook handler to read it from the payload)
-3. Add a webhook on the new project pointing to `/api/gitlab-webhook`
-
----
-
-## Updating Louisa
-
-After making code changes:
-
-```bash
-git add -A
-git commit -m "Your change description"
-git push origin main
-```
-
-If auto-deploy is configured, Vercel picks it up automatically. Otherwise:
-
-```bash
-vercel --prod
-```
+> When modifying prompts, verify results with a real trace in Arthur Engine. The grounding rule ("only include information present in the provided data") is intentional — do not remove it.
 
 ---
 
 ## Troubleshooting
 
+**Release notes aren't appearing after a tag push**
+The webhook now dispatches a GitHub Action instead of generating inline. Check:
+1. **Vercel logs** — confirm the webhook fired and returned `{ action: "dispatched" }`
+2. **GitHub Actions tab** — look for a "Generate GitHub Release Notes" or "Generate Release Notes" run triggered around the time of the tag push
+3. If the Action doesn't appear, verify `LOUISA_GITHUB_REPO` and `GITHUB_TOKEN` are set in Vercel and the token has `repo` scope (needed to dispatch events to the Louisa repo)
+
+**GitHub Action workflow doesn't appear in the UI**
+`workflow_dispatch` workflows only appear in the Actions sidebar if the workflow file exists on the **default branch** (`main`). If you're testing on a feature branch, use the GitHub CLI: `gh workflow run generate-github-release.yml --ref your-branch --field tag=...`
+
 **Webhook returns 401 (Invalid signature/token)**
 The webhook secret in Vercel doesn't match the secret configured on the GitHub or GitLab webhook. Make sure they're identical.
-
-**Release notes aren't appearing**
-Check the Vercel function logs at **vercel.com → Project → Deployments → Latest → Functions**. Common causes:
-- Token doesn't have write access to the target repo/project
-- Environment variables aren't set in Vercel (or weren't redeployed after adding them)
-- The webhook isn't firing the right events (check Recent Deliveries on GitHub or Recent Events on GitLab)
 
 **Notes appear but are empty or generic**
 This usually means 0 commits were found between tags. Check that the previous release tag exists and that commits were made between the two tags.
@@ -584,7 +715,7 @@ Verify `SLACK_WEBHOOK_URL` is set in Vercel and the Incoming Webhook is still ac
 Verify `TEAMS_WEBHOOK_URL` is set in Vercel. If using classic Connectors, check that the connector hasn't expired or been removed from the channel. If using Workflows-based webhooks, verify the flow is enabled. Check Vercel logs for `Louisa: Teams post failed` messages.
 
 **PR/MR descriptions aren't being enriched**
-- Confirm the **Pull requests** event is checked on the GitHub webhook (Settings → Webhooks → Edit → individual events). GitLab requires no changes.
+- Confirm the **Pull requests** event is checked on the GitHub webhook (Settings → Webhooks → Edit → individual events). GitLab requires **Merge request events** to be enabled.
 - Confirm the GitHub token has **Pull requests: Read and write** permission (fine-grained PAT).
 - Check Vercel function logs for `Louisa: enrich` messages — the enrichment step logs its outcome.
 - If a PR was already enriched, the idempotency marker (`<!-- enriched-by-louisa -->`) prevents re-processing. Remove it from the description to force a re-run.
@@ -592,15 +723,17 @@ Verify `TEAMS_WEBHOOK_URL` is set in Vercel. If using classic Connectors, check 
 **No traces appearing in Arthur Engine**
 - Verify `ARTHUR_BASE_URL` and `ARTHUR_API_KEY` are set in Vercel and match your Arthur instance
 - Check Vercel logs for `Louisa: Arthur trace failed` or `Louisa: trace flush error` messages
-- Ensure the Vercel function timeout (`maxDuration: 60`) is long enough for `forceFlush()` to complete before the container is recycled
 - Arthur auto-creates a task named `louisa` on first trace receipt — look for it in the Arthur dashboard if you haven't set `ARTHUR_TASK_ID`
+
+**GitHub Action fails with 403 on `git push` (summaries log)**
+The Action commits the updated `logs/pr-summaries.jsonl` back to the repo. Ensure the workflow has `permissions: contents: write` (already set) and that branch protection rules don't block the `louisa-bot` committer.
 
 ---
 
 ## How It's Built
 
-- **Runtime:** Node.js (ES modules) on Vercel Serverless Functions
-- **AI:** Claude Sonnet via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official TypeScript/JavaScript SDK
+- **Runtime:** Node.js (ES modules) on Vercel Serverless Functions + GitHub Actions
+- **AI:** Claude Haiku (`claude-haiku-4-5`) for per-PR summarization via tool use; Claude Opus (`claude-opus-4-6`) for final release note generation, via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official SDK
 - **Observability:** OpenTelemetry SDK + [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) for automatic LLM span instrumentation, OTLP/proto export to [Arthur Evals Engine](https://arthur.ai)
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
 - **Auth:** Secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
