@@ -82,7 +82,13 @@ const [fromTagDate, toTagDate] = await Promise.all([
   getTagDate(owner, repo, tag),
 ]);
 
-const from = fromTagDate || new Date(0).toISOString();
+// If no previous tag was found, fall back to 30 days before the current tag
+// rather than epoch — epoch causes getPRsByDateRange to return every PR ever merged
+// and triggers a 422 from the GitHub Search API after 1000 results.
+const fallbackFrom = toTagDate
+  ? new Date(new Date(toTagDate).getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
+  : new Date(Date.now()           - 30 * 24 * 60 * 60 * 1000).toISOString();
+const from = fromTagDate || fallbackFrom;
 // Add 10 min buffer so PRs merged during the CI run aren't missed
 const to   = toTagDate
   ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
