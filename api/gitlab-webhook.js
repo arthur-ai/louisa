@@ -8,6 +8,7 @@ import { summarizePR } from "../lib/claude.js";
 import { appendSummary } from "../lib/summaries.js";
 import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
+import { getInstallationToken } from "../lib/github-app.js";
 
 export const config = { maxDuration: 60 };
 
@@ -97,11 +98,11 @@ export default async function handler(req, res) {
  *   GITHUB_TOKEN        — PAT with repo dispatch permission
  */
 async function dispatchReleaseAction({ tag, projectId, scopeProjectId }) {
-  const repo  = process.env.LOUISA_GITHUB_REPO;
-  const token = process.env.GITHUB_TOKEN;
-  if (!repo || !token) {
-    throw new Error("LOUISA_GITHUB_REPO and GITHUB_TOKEN must be set to dispatch release Action");
+  const repo = process.env.LOUISA_GITHUB_REPO;
+  if (!repo) {
+    throw new Error("LOUISA_GITHUB_REPO must be set to dispatch release Action");
   }
+  const token = await getInstallationToken();
   const [owner, repoName] = repo.split("/");
   const res = await fetch(`https://api.github.com/repos/${owner}/${repoName}/dispatches`, {
     method:  "POST",

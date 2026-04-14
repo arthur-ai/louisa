@@ -30,6 +30,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:      ${{ secrets.LOUISA_APP_ID }}
+          private-key: ${{ secrets.LOUISA_APP_PRIVATE_KEY }}
+          # Request access to both louisa (for log commit) and the target repo
+          owner: ${{ github.repository_owner }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -40,13 +49,15 @@ jobs:
 
       - name: Summarize PRs and generate release notes
         env:
-          GITHUB_TOKEN:      ${{ secrets.LOUISA_GITHUB_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          ARTHUR_BASE_URL:   ${{ secrets.ARTHUR_BASE_URL }}
-          ARTHUR_API_KEY:    ${{ secrets.ARTHUR_API_KEY }}
-          ARTHUR_TASK_ID:    ${{ secrets.ARTHUR_TASK_ID }}
+          GITHUB_APP_ID:              ${{ secrets.LOUISA_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY:     ${{ secrets.LOUISA_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+          ANTHROPIC_API_KEY:          ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_WEBHOOK_URL:          ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL:          ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ARTHUR_BASE_URL:            ${{ secrets.ARTHUR_BASE_URL }}
+          ARTHUR_API_KEY:             ${{ secrets.ARTHUR_API_KEY }}
+          ARTHUR_TASK_ID:             ${{ secrets.ARTHUR_TASK_ID }}
           OWNER: ${{ github.event.client_payload.owner || github.event.inputs.owner }}
           REPO:  ${{ github.event.client_payload.repo  || github.event.inputs.repo  }}
           TAG:   ${{ github.event.client_payload.tag   || github.event.inputs.tag   }}
@@ -57,6 +68,8 @@ jobs:
             --tag   "$TAG"
 
       - name: Commit updated summaries log
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git config user.name "louisa-bot"
           git config user.email "louisa-bot@users.noreply.github.com"

@@ -15,10 +15,11 @@ import { appendSummary, readSummariesInRange } from "../lib/summaries.js";
 import { shouldSkipEnrichment } from "../lib/enrich.js";
 import { postReleaseNotification } from "../lib/slack.js";
 import { getTracer, forceFlush, activeSpan } from "../lib/otel.js";
+import { getInstallationToken } from "../lib/github-app.js";
 
 async function dispatchGitHubReleaseAction({ tag, owner, repo }) {
   const lRepo  = process.env.LOUISA_GITHUB_REPO;  // e.g. "arthur-ai/louisa"
-  const token  = process.env.GITHUB_TOKEN;
+  const token  = await getInstallationToken();
   const [lOwner, lRepoName] = lRepo.split("/");
 
   const res = await fetch(

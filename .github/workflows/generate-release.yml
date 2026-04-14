@@ -28,6 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id:      ${{ secrets.LOUISA_APP_ID }}
+          private-key: ${{ secrets.LOUISA_APP_PRIVATE_KEY }}
+          owner:       ${{ github.repository_owner }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -60,6 +68,8 @@ jobs:
             $SCOPE_ARG
 
       - name: Commit updated summaries log
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git config user.name "louisa-bot"
           git config user.email "louisa-bot@users.noreply.github.com"
