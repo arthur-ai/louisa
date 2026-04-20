@@ -1,4 +1,3 @@
-import { verifyGitHubSignature } from "../lib/crypto.js";
 import {
   getPRsByDateRange,
   getTagDate,
@@ -48,16 +47,6 @@ export const config = { maxDuration: 60 };
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const rawBody = typeof req.body === "string"
-    ? req.body
-    : JSON.stringify(req.body);
-
-  const sig = req.headers["x-hub-signature-256"];
-  if (!verifyGitHubSignature(rawBody, sig, process.env.GITHUB_WEBHOOK_SECRET)) {
-    console.warn("Louisa: invalid webhook signature");
-    return res.status(401).json({ error: "Invalid signature" });
   }
 
   const event = req.headers["x-github-event"];
