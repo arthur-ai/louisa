@@ -30,7 +30,6 @@
 
 import {
   getPreviousReleaseTag,
-  getTagDate,
   getCommitsBetweenTags,
   getCommitsBetweenDates,
   getMRsByDateRange,
@@ -76,18 +75,13 @@ if (existing) {
 
 // ── 2. Previous tag + date window ────────────────────────────────────────────
 
-const previousTag = await getPreviousReleaseTag(projectId, tag);
+const { name: previousTag, fromDate, toDate } = await getPreviousReleaseTag(projectId, tag);
 console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
 
-const [fromTagDate, toTagDate] = await Promise.all([
-  previousTag ? getTagDate(projectId, previousTag) : Promise.resolve(null),
-  getTagDate(projectId, tag),
-]);
-
-const from = fromTagDate || new Date(0).toISOString();
+const from = fromDate || new Date(0).toISOString();
 // Add 10 min buffer to toDate so MRs merged during the CI run aren't missed
-const to   = toTagDate
-  ? new Date(new Date(toTagDate).getTime() + 10 * 60 * 1000).toISOString()
+const to   = toDate
+  ? new Date(new Date(toDate).getTime() + 10 * 60 * 1000).toISOString()
   : new Date().toISOString();
 
 // ── 3. Commits ───────────────────────────────────────────────────────────────
