@@ -101,10 +101,14 @@ console.log(`Louisa: ${commits.length} commits (${backendCommits.length} backend
 
 // ── 4. Summarize MRs ─────────────────────────────────────────────────────────
 
+// Returns the Set of MR numbers that belong to this release for projId.
+// Summarizes any that haven't been processed yet, then returns the full set.
 async function summarizeProject(projId, commits) {
   const commitShas = commits.map((c) => c.sha);
   const mrs = await getMergeRequestsForCommits(projId, commitShas);
   console.log(`Louisa: project ${projId} — ${mrs.length} MRs for ${commitShas.length} commits`);
+
+  const relevantNumbers = new Set(mrs.map((mr) => mr.number));
 
   // Use tag-based lookup for idempotency — more reliable than date range
   const alreadyDone = readSummariesForTag(String(projId), tag) || [];
@@ -154,10 +158,14 @@ async function summarizeProject(projId, commits) {
       console.error(`  Failed to summarize MR !${mr.number}: ${err.message}`);
     }
   }
+
+  return relevantNumbers;
 }
 
-await summarizeProject(projectId, backendCommits);
-if (scopeProjectId) await summarizeProject(scopeProjectId, frontendCommits);
+const [backendMrNumbers, frontendMrNumbers] = await Promise.all([
+  summarizeProject(projectId, backendCommits),
+  scopeProjectId ? summarizeProject(scopeProjectId, frontendCommits) : Promise.resolve(new Set()),
+]);
 
 // ── 5. Build MR list from summaries ─────────────────────────────────────────
 
@@ -172,9 +180,15 @@ function summaryToMR(entry) {
   };
 }
 
-const backendMRs  = (readSummariesForTag(String(projectId), tag) || []).map(summaryToMR);
+// Filter to only MRs actually associated with this release's commits, guarding
+// against stale entries from previous broken runs that may have tagged unrelated MRs.
+const backendMRs  = (readSummariesForTag(String(projectId), tag) || [])
+  .filter((e) => backendMrNumbers.has(e.number))
+  .map(summaryToMR);
 const frontendMRs = scopeProjectId
-  ? (readSummariesForTag(String(scopeProjectId), tag) || []).map(summaryToMR)
+  ? (readSummariesForTag(String(scopeProjectId), tag) || [])
+      .filter((e) => frontendMrNumbers.has(e.number))
+      .map(summaryToMR)
   : [];
 const mergeRequests = [...backendMRs, ...frontendMRs];
 console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
