@@ -170,6 +170,7 @@ const [backendMrNumbers, frontendMrNumbers] = await Promise.all([
 // ── 5. Build MR list from summaries ─────────────────────────────────────────
 
 function summaryToMR(entry) {
+  if (!entry.number) return null;
   return {
     number: entry.number,
     title:  entry.title,
@@ -183,12 +184,14 @@ function summaryToMR(entry) {
 // Filter to only MRs actually associated with this release's commits, guarding
 // against stale entries from previous broken runs that may have tagged unrelated MRs.
 const backendMRs  = (readSummariesForTag(String(projectId), tag) || [])
-  .filter((e) => backendMrNumbers.has(e.number))
-  .map(summaryToMR);
+  .filter((e) => e.number && backendMrNumbers.has(e.number))
+  .map(summaryToMR)
+  .filter(Boolean);
 const frontendMRs = scopeProjectId
   ? (readSummariesForTag(String(scopeProjectId), tag) || [])
-      .filter((e) => frontendMrNumbers.has(e.number))
+      .filter((e) => e.number && frontendMrNumbers.has(e.number))
       .map(summaryToMR)
+      .filter(Boolean)
   : [];
 const mergeRequests = [...backendMRs, ...frontendMRs];
 console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);

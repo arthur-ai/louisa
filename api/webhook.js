@@ -177,10 +177,11 @@ export default async function handler(req, res) {
           // Try the local summaries log first — populated at PR merge time
           const cached = readSummariesInRange(`${owner}/${repo}`, from, to);
           if (cached !== null) {
-            console.log(`Louisa: using ${cached.length} pre-computed PR summaries from log`);
-            s.setAttribute("output.value",     JSON.stringify(cached.map(e => ({ number: e.number, title: e.title }))));
+            const valid = cached.filter((e) => e.number);
+            console.log(`Louisa: using ${valid.length} pre-computed PR summaries from log`);
+            s.setAttribute("output.value",     JSON.stringify(valid.map(e => ({ number: e.number, title: e.title }))));
             s.setAttribute("output.mime_type", "application/json");
-            return cached.map((entry) => ({
+            return valid.map((entry) => ({
               number: entry.number,
               title:  entry.title,
               body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
