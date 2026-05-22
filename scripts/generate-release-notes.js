@@ -26,8 +26,15 @@
  * Optional:
  *   SLACK_WEBHOOK_URL, TEAMS_WEBHOOK_URL
  *   ARTHUR_BASE_URL, ARTHUR_API_KEY, ARTHUR_TASK_ID  (tracing)
+ *
+ * Tracing follows the Arthur OpenInference convention:
+ *   - one root CHAIN span for the whole pipeline (session.id = tag)
+ *   - sub-CHAIN spans for per-project and per-MR summarization (each groups one or more LLM calls)
+ *   - LLM spans come automatically from AnthropicInstrumentation in lib/otel.js
+ *   - GitLab API calls are intentionally not wrapped as TOOL spans — TOOL is for LLM-invoked tools
  */
 
+import { getTracer, activeSpan, forceFlush } from "../lib/otel.js";
 import {
   getPreviousReleaseTag,
   getCommitsBetweenTags,
@@ -44,6 +51,10 @@ import { summarizePR } from "../lib/claude.js";
 import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
 import { appendSummary, readSummariesForTag, readSummariesInRange } from "../lib/summaries.js";
 import { postReleaseNotification } from "../lib/slack.js";
+
+// Initialise OTel provider + Anthropic auto-instrumentation before any
+// lib/claude*.js function lazily constructs an Anthropic client.
+const tracer = getTracer();
 
 // ── Args ──────────────────────────────────────────────────────────────────────
 
@@ -65,159 +76,203 @@ if (!tag || !projectId) {
 
 console.log(`Louisa: generating release notes for ${tag} (project ${projectId}${scopeProjectId ? ` + scope ${scopeProjectId}` : ""})`);
 
-// ── 1. Idempotency check ─────────────────────────────────────────────────────
+// ── Per-project summarization (CHAIN — groups one LLM call per uncached MR) ──
 
-const existing = await getReleaseByTag(projectId, tag);
-if (existing) {
-  console.log(`Louisa: release already exists for ${tag} — nothing to do`);
-  process.exit(0);
-}
-
-// ── 2. Previous tag + date window ────────────────────────────────────────────
-
-const { name: previousTag, fromDate, toDate } = await getPreviousReleaseTag(projectId, tag);
-console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
-
-const from = fromDate || new Date(0).toISOString();
-// Add 10 min buffer to toDate so MRs merged during the CI run aren't missed
-const to   = toDate
-  ? new Date(new Date(toDate).getTime() + 10 * 60 * 1000).toISOString()
-  : new Date().toISOString();
-
-// ── 3. Commits ───────────────────────────────────────────────────────────────
-
-const frontendCommitPromise = (() => {
-  if (!scopeProjectId) return Promise.resolve([]);
-  // Scope project uses different tags — query by date range instead
-  return getCommitsBetweenDates(scopeProjectId, from, to);
-})();
-
-const [backendCommits, frontendCommits] = await Promise.all([
-  getCommitsBetweenTags(projectId, previousTag, tag),
-  frontendCommitPromise,
-]);
-const commits = [...backendCommits, ...frontendCommits];
-console.log(`Louisa: ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
-
-// ── 4. Summarize MRs ─────────────────────────────────────────────────────────
-
-// Returns the Set of MR numbers that belong to this release for projId.
-// Summarizes any that haven't been processed yet, then returns the full set.
 async function summarizeProject(projId, commits) {
-  const commitShas = commits.map((c) => c.sha);
-  const mrs = await getMergeRequestsForCommits(projId, commitShas);
-  console.log(`Louisa: project ${projId} — ${mrs.length} MRs for ${commitShas.length} commits`);
+  return activeSpan(tracer, "louisa.summarize_project", {
+    "openinference.span.kind": "CHAIN",
+    "input.value":             JSON.stringify({ projectId: String(projId), commits: commits.length, tag }),
+    "input.mime_type":         "application/json",
+    "project_id":              String(projId),
+    "tag":                     tag,
+  }, async (chainSpan) => {
+    const commitShas = commits.map((c) => c.sha);
+    const mrs = await getMergeRequestsForCommits(projId, commitShas);
+    console.log(`Louisa: project ${projId} — ${mrs.length} MRs for ${commitShas.length} commits`);
 
-  const relevantNumbers = new Set(mrs.map((mr) => mr.number));
+    const relevantNumbers = new Set(mrs.map((mr) => mr.number));
+    const alreadyDone = readSummariesForTag(String(projId), tag) || [];
+    const doneKeys    = new Set(alreadyDone.map((e) => `${e.repo}:${e.number}`));
 
-  // Use tag-based lookup for idempotency — more reliable than date range
-  const alreadyDone = readSummariesForTag(String(projId), tag) || [];
-  const doneKeys    = new Set(alreadyDone.map((e) => `${e.repo}:${e.number}`));
+    let summarized = 0;
+    let skipped    = 0;
+    let failed     = 0;
 
-  for (const mr of mrs) {
-    const key = `${projId}:${mr.number}`;
-    if (doneKeys.has(key)) {
-      console.log(`  MR !${mr.number} already summarized — skipping`);
-      continue;
+    for (const mr of mrs) {
+      const key = `${projId}:${mr.number}`;
+      if (doneKeys.has(key)) {
+        console.log(`  MR !${mr.number} already summarized — skipping`);
+        skipped++;
+        continue;
+      }
+
+      console.log(`  Summarizing MR !${mr.number}: "${mr.title}"`);
+      try {
+        await activeSpan(tracer, "louisa.summarize_mr", {
+          "openinference.span.kind": "CHAIN",
+          "input.value":             JSON.stringify({ mrIid: mr.number, title: mr.title, projectId: String(projId), tag }),
+          "input.mime_type":         "application/json",
+          "mr_iid":                  String(mr.number),
+          "project_id":              String(projId),
+          "tag":                     tag,
+        }, async (mrSpan) => {
+          const [mrCommits, files, comments] = await Promise.all([
+            getMRCommits(projId, mr.number),
+            getMRChanges(projId, mr.number),
+            getMRNotes(projId, mr.number),
+          ]);
+
+          // The Anthropic call inside summarizePR becomes an auto-instrumented LLM child span.
+          const { summary, type, userImpact } = await summarizePR({
+            platform: "gitlab",
+            title:    mr.title,
+            body:     mr.body || "",
+            commits:  mrCommits,
+            files,
+            comments,
+          });
+
+          appendSummary({
+            platform:   "gitlab",
+            repo:       String(projId),
+            number:     mr.number,
+            title:      mr.title,
+            summary,
+            type,
+            userImpact,
+            author:     mr.author,
+            labels:     mr.labels || [],
+            url:        mr.url,
+            mergedAt:   mr.mergedAt || new Date().toISOString(),
+            tag,
+          });
+
+          mrSpan.setAttribute("output.value",     JSON.stringify({ type, summary }));
+          mrSpan.setAttribute("output.mime_type", "application/json");
+          console.log(`    → [${type}] ${summary.slice(0, 100)}`);
+        });
+        summarized++;
+      } catch (err) {
+        console.error(`  Failed to summarize MR !${mr.number}: ${err.message}`);
+        failed++;
+      }
     }
 
-    console.log(`  Summarizing MR !${mr.number}: "${mr.title}"`);
-    try {
-      const [mrCommits, files, comments] = await Promise.all([
-        getMRCommits(projId, mr.number),
-        getMRChanges(projId, mr.number),
-        getMRNotes(projId, mr.number),
-      ]);
+    chainSpan.setAttribute("output.value", JSON.stringify({
+      mrCount: relevantNumbers.size,
+      summarized,
+      skipped,
+      failed,
+    }));
+    chainSpan.setAttribute("output.mime_type", "application/json");
+    return relevantNumbers;
+  });
+}
 
-      const { summary, type, userImpact } = await summarizePR({
-        platform: "gitlab",
-        title:    mr.title,
-        body:     mr.body || "",
-        commits:  mrCommits,
-        files,
-        comments,
-      });
+// ── Main pipeline (root CHAIN — session = release tag) ──────────────────────
 
-      appendSummary({
-        platform:   "gitlab",
-        repo:       String(projId),
-        number:     mr.number,
-        title:      mr.title,
-        summary,
-        type,
-        userImpact,
-        author:     mr.author,
-        labels:     mr.labels || [],
-        url:        mr.url,
-        mergedAt:   mr.mergedAt || new Date().toISOString(),
-        tag,
-      });
-
-      console.log(`    → [${type}] ${summary.slice(0, 100)}`);
-    } catch (err) {
-      console.error(`  Failed to summarize MR !${mr.number}: ${err.message}`);
+try {
+  await activeSpan(tracer, "louisa.generate_release", {
+    "openinference.span.kind": "CHAIN",
+    "session.id":              tag,
+    "input.value":             JSON.stringify({ tag, projectId: String(projectId), scopeProjectId: scopeProjectId || null }),
+    "input.mime_type":         "application/json",
+    "tag":                     tag,
+    "project_id":              String(projectId),
+    "scope_project_id":        scopeProjectId ? String(scopeProjectId) : "",
+  }, async (rootSpan) => {
+    // 1. Idempotency
+    const existing = await getReleaseByTag(projectId, tag);
+    if (existing) {
+      console.log(`Louisa: release already exists for ${tag} — nothing to do`);
+      rootSpan.setAttribute("output.value",     "release already exists — skipped");
+      rootSpan.setAttribute("output.mime_type", "text/plain");
+      return;
     }
-  }
 
-  return relevantNumbers;
-}
+    // 2. Previous tag + date window
+    const { name: previousTag, fromDate, toDate } = await getPreviousReleaseTag(projectId, tag);
+    console.log(`Louisa: comparing ${previousTag || "(none)"} → ${tag}`);
 
-const [backendMrNumbers, frontendMrNumbers] = await Promise.all([
-  summarizeProject(projectId, backendCommits),
-  scopeProjectId ? summarizeProject(scopeProjectId, frontendCommits) : Promise.resolve(new Set()),
-]);
+    const from = fromDate || new Date(0).toISOString();
+    // Add 10 min buffer to toDate so MRs merged during the CI run aren't missed
+    const to   = toDate
+      ? new Date(new Date(toDate).getTime() + 10 * 60 * 1000).toISOString()
+      : new Date().toISOString();
 
-// ── 5. Build MR list from summaries ─────────────────────────────────────────
+    // 3. Commits (backend + optional frontend/scope)
+    const frontendCommitPromise = scopeProjectId
+      ? getCommitsBetweenDates(scopeProjectId, from, to)
+      : Promise.resolve([]);
 
-function summaryToMR(entry) {
-  if (!entry.number) return null;
-  return {
-    number: entry.number,
-    title:  entry.title,
-    body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
-    author: entry.author,
-    labels: entry.labels || [],
-    url:    entry.url,
-  };
-}
+    const [backendCommits, frontendCommits] = await Promise.all([
+      getCommitsBetweenTags(projectId, previousTag, tag),
+      frontendCommitPromise,
+    ]);
+    const commits = [...backendCommits, ...frontendCommits];
+    console.log(`Louisa: ${commits.length} commits (${backendCommits.length} backend, ${frontendCommits.length} frontend)`);
 
-// Filter to only MRs actually associated with this release's commits, guarding
-// against stale entries from previous broken runs that may have tagged unrelated MRs.
-const backendMRs  = (readSummariesForTag(String(projectId), tag) || [])
-  .filter((e) => e.number && backendMrNumbers.has(e.number))
-  .map(summaryToMR)
-  .filter(Boolean);
-const frontendMRs = scopeProjectId
-  ? (readSummariesForTag(String(scopeProjectId), tag) || [])
-      .filter((e) => e.number && frontendMrNumbers.has(e.number))
+    // 4. Summarize MRs (per-project CHAIN spans contain per-MR CHAIN + auto LLM spans)
+    const [backendMrNumbers, frontendMrNumbers] = await Promise.all([
+      summarizeProject(projectId, backendCommits),
+      scopeProjectId ? summarizeProject(scopeProjectId, frontendCommits) : Promise.resolve(new Set()),
+    ]);
+
+    // 5. Build MR list from summaries (filtered to this release's commits)
+    function summaryToMR(entry) {
+      if (!entry.number) return null;
+      return {
+        number: entry.number,
+        title:  entry.title,
+        body:   `**Summary:** ${entry.summary}\n\n**User Impact:** ${entry.userImpact}\n\n**Type:** ${entry.type}`,
+        author: entry.author,
+        labels: entry.labels || [],
+        url:    entry.url,
+      };
+    }
+
+    const backendMRs  = (readSummariesForTag(String(projectId), tag) || [])
+      .filter((e) => e.number && backendMrNumbers.has(e.number))
       .map(summaryToMR)
-      .filter(Boolean)
-  : [];
-const mergeRequests = [...backendMRs, ...frontendMRs];
-console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
+      .filter(Boolean);
+    const frontendMRs = scopeProjectId
+      ? (readSummariesForTag(String(scopeProjectId), tag) || [])
+          .filter((e) => e.number && frontendMrNumbers.has(e.number))
+          .map(summaryToMR)
+          .filter(Boolean)
+      : [];
+    const mergeRequests = [...backendMRs, ...frontendMRs];
+    console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
 
-// ── 6. Generate release notes ────────────────────────────────────────────────
+    // 6. Generate release notes — auto-instrumented LLM child span
+    const { text: notes } = await generatePlatformReleaseNotes({
+      tagName:       tag,
+      releaseName:   tag,
+      commits,
+      mergeRequests,
+      previousTag,
+    });
 
-const { text: notes } = await generatePlatformReleaseNotes({
-  tagName:       tag,
-  releaseName:   tag,
-  commits,
-  mergeRequests,
-  previousTag,
-});
+    // 7. Create GitLab release
+    const footer = "\n\n---\n_Release notes generated by Louisa_";
+    await createRelease(projectId, tag, tag, notes + footer);
+    console.log(`Louisa: GitLab release created — ${tag}`);
 
-// ── 7. Create GitLab release ─────────────────────────────────────────────────
+    // 8. Notify
+    const projectUrl = await getProjectUrl(projectId);
+    const releaseUrl = projectUrl
+      ? `${projectUrl}/-/releases/${encodeURIComponent(tag)}`
+      : "";
+    await postReleaseNotification(tag, releaseUrl, notes);
+    console.log(`Louisa: notification sent`);
 
-const footer = "\n\n---\n_Release notes generated by Louisa_";
-await createRelease(projectId, tag, tag, notes + footer);
-console.log(`Louisa: GitLab release created — ${tag}`);
-
-// ── 8. Notify ────────────────────────────────────────────────────────────────
-
-const projectUrl = await getProjectUrl(projectId);
-const releaseUrl = projectUrl
-  ? `${projectUrl}/-/releases/${encodeURIComponent(tag)}`
-  : "";
-
-await postReleaseNotification(tag, releaseUrl, notes);
-console.log(`Louisa: notification sent`);
+    rootSpan.setAttribute("output.value", JSON.stringify({
+      tag,
+      mrCount:     mergeRequests.length,
+      notesLength: notes.length,
+    }));
+    rootSpan.setAttribute("output.mime_type", "application/json");
+  });
+} finally {
+  await forceFlush();
+}
