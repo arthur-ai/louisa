@@ -32,7 +32,7 @@ import {
   getPreviousReleaseTag,
   getCommitsBetweenTags,
   getCommitsBetweenDates,
-  getMRsByDateRange,
+  getMergeRequestsForCommits,
   getMRCommits,
   getMRChanges,
   getMRNotes,
@@ -101,9 +101,10 @@ console.log(`Louisa: ${commits.length} commits (${backendCommits.length} backend
 
 // ── 4. Summarize MRs ─────────────────────────────────────────────────────────
 
-async function summarizeProject(projId) {
-  const mrs = await getMRsByDateRange(projId, from, to);
-  console.log(`Louisa: project ${projId} — ${mrs.length} MRs in window`);
+async function summarizeProject(projId, commits) {
+  const commitShas = commits.map((c) => c.sha);
+  const mrs = await getMergeRequestsForCommits(projId, commitShas);
+  console.log(`Louisa: project ${projId} — ${mrs.length} MRs for ${commitShas.length} commits`);
 
   // Use tag-based lookup for idempotency — more reliable than date range
   const alreadyDone = readSummariesForTag(String(projId), tag) || [];
@@ -155,8 +156,8 @@ async function summarizeProject(projId) {
   }
 }
 
-await summarizeProject(projectId);
-if (scopeProjectId) await summarizeProject(scopeProjectId);
+await summarizeProject(projectId, backendCommits);
+if (scopeProjectId) await summarizeProject(scopeProjectId, frontendCommits);
 
 // ── 5. Build MR list from summaries ─────────────────────────────────────────
 
