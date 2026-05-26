@@ -45,10 +45,15 @@ jobs:
 
       - name: Draft blog post
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ARTHUR_BASE_URL:   ${{ secrets.ARTHUR_BASE_URL }}
-          ARTHUR_API_KEY:    ${{ secrets.ARTHUR_API_KEY }}
-          ARTHUR_TASK_ID:    ${{ secrets.ARTHUR_TASK_ID }}
+          ANTHROPIC_API_KEY:       ${{ secrets.ANTHROPIC_API_KEY }}
+          ARTHUR_BASE_URL:         ${{ secrets.ARTHUR_BASE_URL }}
+          ARTHUR_API_KEY:          ${{ secrets.ARTHUR_API_KEY }}
+          ARTHUR_TASK_ID:          ${{ secrets.ARTHUR_TASK_ID }}
+          REPO_OWNER:              ${{ secrets.REPO_OWNER }}
+          REPO_NAME:               ${{ secrets.REPO_NAME }}
+          GITLAB_TOKEN:            ${{ secrets.GITLAB_TOKEN }}
+          GITLAB_PROJECT_ID:       ${{ secrets.GITLAB_PROJECT_ID }}
+          GITLAB_SCOPE_PROJECT_ID: ${{ secrets.GITLAB_SCOPE_PROJECT_ID }}
         run: node scripts/draft-blog.js "${{ steps.month.outputs.value }}" --days 30
 
       - name: Upload draft as artifact
