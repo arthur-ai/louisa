@@ -18,6 +18,12 @@ import {
   readdirSync,
 } from "fs";
 import { join } from "path";
+import { getTracer, activeSpan, forceFlush } from "../lib/otel.js";
+
+// Initialise OTel provider + Anthropic auto-instrumentation before the
+// Anthropic client is constructed so the messages.create() call below
+// becomes an auto-instrumented LLM child span.
+const tracer = getTracer();
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -119,10 +125,18 @@ STRUCTURE TO FOLLOW:
    - What Arthur built: introduce the feature name in bold
    - Capability bullets: **Bold capability name.** *Italic sentence explaining the real-world benefit.*
    - Optional persona payoff: 2–3 lines on what this means for PMs / developers / compliance
-5. Enterprise / Infra Section (if applicable): tighter, "meeting teams where they are" framing
-6. Bug Fix / OSS Section (if applicable): short bullets with a brief human intro sentence
-7. Closing Section: mirror the opening tension, resolve it. Short declarative parallel sentences (e.g. "From reactive debugging to proactive insight. / From fragmented experimentation to reproducible evaluation."). End with a 1–2 sentence vision statement.
+   - **Sources line** (required for every feature section): on its own line at the end of the section, write \`**Sources:** (#123, #456, …)\` listing every PR number from the source release notes that this section draws from. A section may cite multiple PRs. Use ONLY PR numbers that appear in the provided release notes data — never invent or guess.
+5. Enterprise / Infra Section (if applicable): tighter, "meeting teams where they are" framing — also ends with a **Sources:** line
+6. Bug Fix / OSS Section (if applicable): short bullets with a brief human intro sentence — also ends with a **Sources:** line
+7. Closing Section: mirror the opening tension, resolve it. Short declarative parallel sentences (e.g. "From reactive debugging to proactive insight. / From fragmented experimentation to reproducible evaluation."). End with a 1–2 sentence vision statement. No Sources line on the closing section.
 8. PS — Always. Personal and casual, from Ashley. Reference something genuine about the release. Invite direct reply to ashley@arthur.ai. Include: "See the full platform release notes for [Month Year] here." with a link to https://docs.arthur.ai/changelog
+
+SOURCE ATTRIBUTION RULES:
+- The release notes provided below already attribute each bullet to a PR with \`(#<number>)\`. Treat these PR numbers as your source of truth.
+- For each feature section in the blog, identify every PR from the release notes that contributed to the theme of that section and list them on the **Sources:** line.
+- Format: \`**Sources:** (#123, #456, #789)\` — comma-separated, on its own line, immediately before the section's horizontal rule.
+- A single PR may appear under multiple sections if it genuinely contributed to both.
+- If a section has no traceable PR attribution in the source data, omit the **Sources:** line for that section rather than inventing numbers.
 
 SCALE BY RELEASE SIZE:
 - Major: Long-form, 5–8 sections, rich persona callouts, big-picture industry framing in the hook
@@ -134,7 +148,9 @@ AVOID:
 - Vague AI hype without grounding ("revolutionary," "game-changing")
 - Bullets that describe a thing without stating a benefit
 - Closing that reads like a summary instead of a narrative landing
-- Forgetting the PS`;
+- Forgetting the PS
+- Forgetting the **Sources:** line at the end of each feature section
+- Inventing PR numbers that aren't present in the provided release notes`;
 
 const releaseBlocks = releases
   .map(
@@ -157,35 +173,58 @@ ${releaseBlocks}
 INSTRUCTIONS:
 - Identify the overarching narrative theme across all releases this month.
 - Determine release size: Major, Mid-size, or Light.
-- Draft the full blog post following the structure and voice in your instructions.`;
+- Draft the full blog post following the structure and voice in your instructions.
+- For every feature section, end with a **Sources:** line listing the PR numbers (e.g. \`**Sources:** (#123, #456)\`) drawn from the \`(#<number>)\` attributions in the release notes above. A section may cite multiple PRs; one PR may appear in multiple sections.`;
 
-// ── Call Claude ───────────────────────────────────────────────────────────────
+// ── Call Claude (root CHAIN — session = month slug) ──────────────────────────
 
 const client = new Anthropic();
 
-console.log("Calling Claude to draft blog post...");
-const message = await client.messages.create({
-  model:      "claude-sonnet-4-20250514",
-  max_tokens: 8192,
-  system:     systemPrompt,
-  messages:   [{ role: "user", content: userMessage }],
-});
+try {
+  await activeSpan(tracer, "louisa.draft_blog", {
+    "openinference.span.kind": "CHAIN",
+    "session.id":              monthSlug,
+    "input.value":             JSON.stringify({ month, monthSlug, releaseCount: releases.length, days: days ?? null }),
+    "input.mime_type":         "application/json",
+    "month":                   month,
+    "month_slug":              monthSlug,
+    "release_count":           releases.length,
+  }, async (rootSpan) => {
+    console.log("Calling Claude to draft blog post...");
+    const message = await client.messages.create({
+      model:      "claude-sonnet-4-20250514",
+      max_tokens: 8192,
+      system:     systemPrompt,
+      messages:   [{ role: "user", content: userMessage }],
+    });
 
-const draft = message.content
-  .filter((b) => b.type === "text")
-  .map((b) => b.text)
-  .join("\n")
-  .trim();
+    const draft = message.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
 
-// ── Write output ──────────────────────────────────────────────────────────────
+    // ── Write output ────────────────────────────────────────────────────────────
 
-const outputDir  = join(root, "output");
-mkdirSync(outputDir, { recursive: true });
+    const outputDir  = join(root, "output");
+    mkdirSync(outputDir, { recursive: true });
 
-const outputPath = join(outputDir, `blog-draft-${monthSlug}.md`);
-writeFileSync(outputPath, draft);
+    const outputPath = join(outputDir, `blog-draft-${monthSlug}.md`);
+    writeFileSync(outputPath, draft);
 
-console.log(`\nBlog draft written to: ${outputPath}`);
-console.log(
-  `Tokens used: ${message.usage.input_tokens} in, ${message.usage.output_tokens} out`
-);
+    console.log(`\nBlog draft written to: ${outputPath}`);
+    console.log(
+      `Tokens used: ${message.usage.input_tokens} in, ${message.usage.output_tokens} out`
+    );
+
+    rootSpan.setAttribute("output.value", JSON.stringify({
+      outputPath,
+      draftLength:  draft.length,
+      inputTokens:  message.usage.input_tokens,
+      outputTokens: message.usage.output_tokens,
+    }));
+    rootSpan.setAttribute("output.mime_type", "application/json");
+  });
+} finally {
+  await forceFlush();
+}

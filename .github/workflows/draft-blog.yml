@@ -46,6 +46,9 @@ jobs:
       - name: Draft blog post
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ARTHUR_BASE_URL:   ${{ secrets.ARTHUR_BASE_URL }}
+          ARTHUR_API_KEY:    ${{ secrets.ARTHUR_API_KEY }}
+          ARTHUR_TASK_ID:    ${{ secrets.ARTHUR_TASK_ID }}
         run: node scripts/draft-blog.js "${{ steps.month.outputs.value }}" --days 30
 
       - name: Upload draft as artifact
