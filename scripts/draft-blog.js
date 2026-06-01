@@ -120,7 +120,12 @@ async function fetchGitLabProjectUrl(projectId) {
 const gitlabWebUrl = await fetchGitLabProjectUrl(process.env.GITLAB_PROJECT_ID);
 
 function buildPrUrlMap(release) {
-  const nums = [...new Set([...release.summary.matchAll(/\(#(\d+)\)/g)].map((m) => m[1]))];
+  // GitHub release notes attribute MRs with (#N); GitLab uses (!N). Match both.
+  const nums = [
+    ...new Set(
+      [...release.summary.matchAll(/\((?:#|!)(\d+)\)/g)].map((m) => m[1])
+    ),
+  ];
   const map = {};
   if (release.product === "Arthur Engine" && REPO_OWNER && REPO_NAME) {
     for (const n of nums) {
@@ -176,9 +181,9 @@ STRUCTURE TO FOLLOW:
 8. PS — Always. Personal and casual, from Ashley. Reference something genuine about the release. Invite direct reply to ashley@arthur.ai. Include: "See the full platform release notes for [Month Year] here." with a link to https://docs.arthur.ai/changelog
 
 SOURCE ATTRIBUTION RULES:
-- The release notes provided below already attribute each bullet to a PR with \`(#<number>)\`. Treat these PR numbers as your source of truth.
+- The release notes provided below already attribute each bullet to a PR or MR. **GitHub PRs use \`(#<number>)\` (hash); GitLab MRs use \`(!<number>)\` (bang).** Treat these numbers as your source of truth — these are the ONLY valid PR numbers. Never invent numbers from version tags (e.g. \`1.4.2164\` does NOT mean PR #2164) or anywhere else.
 - Attribute sources **inline at the end of each bullet point**, not in a section-level Sources line. Do NOT emit a \`**Sources:**\` line at the end of any section.
-- Format: end each bullet with one or more markdown-linked PR references in parentheses, e.g. \`* **Capability name.** *Benefit explanation.* ([#123](URL), [#456](URL))\`.
+- Format: regardless of source format, render every link as \`[#<number>](URL)\`. End each bullet with one or more markdown-linked PR references in parentheses, e.g. \`* **Capability name.** *Benefit explanation.* ([#123](URL), [#456](URL))\`.
 - A bullet may cite multiple PRs if more than one genuinely contributed to that specific capability. List only PRs that informed THAT bullet — never reuse the same PR across unrelated bullets, and never lump every PR from a section into every bullet.
 - The URL for each PR MUST come from the PR LINK TABLE provided in the user message. Do not fabricate URLs. If a PR number is not in the table, render it as plain \`#<number>\` without a link rather than guessing.
 - If a specific bullet has no traceable PR attribution in the source data, omit the inline citation for that bullet rather than inventing numbers.
@@ -196,7 +201,8 @@ AVOID:
 - Forgetting the PS
 - Emitting a section-level \`**Sources:**\` line (sources go inline on each bullet)
 - Duplicating the same PR across every bullet in a section — attribute each PR only to the specific bullet(s) it contributed to
-- Inventing PR numbers or URLs that aren't present in the provided release notes or PR LINK TABLE`;
+- Inventing PR numbers or URLs that aren't present in the provided release notes or PR LINK TABLE
+- Pulling numbers from version tags (e.g. \`1.4.2164\`) and citing them as PR numbers — version components are NOT PR numbers`;
 
 const releaseBlocks = releasesWithLinks
   .map(
@@ -230,7 +236,7 @@ Below are the release notes Louisa generated for every tag shipped this month. U
 ${releaseBlocks}
 
 PR LINK TABLE:
-Use these URLs to render each inline PR attribution as a markdown link. Format: \`[#<number>](<url>)\`. If a PR number is not in this table, render it as plain \`#<number>\` without a link.
+Use these URLs to render each inline PR attribution as a markdown link. The table covers both GitHub PRs (originally written as \`(#N)\` in the release notes) and GitLab MRs (originally written as \`(!N)\`). Regardless of source format, output \`[#<number>](<url>)\`. If a PR number is not in this table, render it as plain \`#<number>\` without a link.
 
 ${prLinkTable || "(no PR URLs resolved — render PR numbers as plain #<number>)"}
 
