@@ -162,7 +162,7 @@ const client = new Anthropic();
 
 console.log("Calling Claude to synthesize changelog...");
 const message = await client.messages.create({
-  model:      "claude-sonnet-4-20250514",
+  model:      "claude-opus-4-8",
   max_tokens: 4096,
   system:     systemPrompt,
   messages:   [{ role: "user", content: userMessage }],

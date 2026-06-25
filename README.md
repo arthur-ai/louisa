@@ -100,7 +100,7 @@ The GitHub Action also commits `logs/pr-summaries.jsonl` back to the repo after 
 | Task | Model | Why |
 |------|-------|-----|
 | Per-PR/MR summarization | `claude-haiku-4-5` | ~10× faster and cheaper; output is 2-3 sentences |
-| Release notes generation | `claude-opus-4-6` | Richer synthesis; runs once per tag in a GitHub Action |
+| Release notes generation | `claude-opus-4-8` | Richer synthesis; runs once per tag in a GitHub Action |
 
 Haiku also uses [tool use](https://docs.anthropic.com/en/docs/tool-use) with a strict schema — this guarantees structured JSON output without needing to parse free-form text or strip markdown code fences.
 
@@ -180,7 +180,7 @@ louisa.github.release  [CHAIN]
 ├── github.get_previous_tag       [TOOL]   → "v1.4.2"
 ├── github.get_commits            [TOOL]   → 14 commits
 ├── github.get_pull_requests      [TOOL]   → 6 merged PRs
-├── anthropic.messages.create     [LLM]    → claude-opus-4-6
+├── anthropic.messages.create     [LLM]    → claude-opus-4-8
 │       input tokens: 3,847  output tokens: 812
 │       system prompt, user message, full assistant response
 ├── github.create_release         [TOOL]   → https://github.com/…/releases/tag/v1.5.0
@@ -733,7 +733,7 @@ The Action commits the updated `logs/pr-summaries.jsonl` back to the repo. Ensur
 ## How It's Built
 
 - **Runtime:** Node.js (ES modules) on Vercel Serverless Functions + GitHub Actions
-- **AI:** Claude Haiku (`claude-haiku-4-5`) for per-PR summarization via tool use; Claude Opus (`claude-opus-4-6`) for final release note generation, via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official SDK
+- **AI:** Claude Haiku (`claude-haiku-4-5`) for per-PR summarization via tool use; Claude Opus (`claude-opus-4-8`) for final release note generation, via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official SDK
 - **Observability:** OpenTelemetry SDK + [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) for automatic LLM span instrumentation, OTLP/proto export to [Arthur Evals Engine](https://arthur.ai)
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
 - **Auth:** Secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls
