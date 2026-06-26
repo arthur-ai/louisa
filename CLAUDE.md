@@ -11,6 +11,10 @@ Louisa is a Vercel serverless bot that generates AI release notes for Arthur. It
 
 Additionally, when a PR/MR is *merged* (before any tag push), both webhooks enrich the PR/MR title and description in place via `lib/enrich.js`. This enriched content is then available when release notes are generated.
 
+A third, interactive pipeline answers ad-hoc version-range questions from Slack:
+
+- **Slack @mention (cross-version summary):** `@Louisa` mention → `api/slack-events.js` → `lib/github.js`/`lib/gitlab.js` (list published releases between two versions) → `lib/claude.js#summarizeVersionRange` → threaded reply via `lib/slack.js#postMessage`
+
 ## Running locally
 
 ```bash
@@ -24,6 +28,7 @@ No test runner exists. Logic is validated by running scripts directly. All scrip
 set -a && source .env.local && set +a
 node scripts/list-prod-tags.js       # verify GitLab tag sort logic
 node scripts/test-tag-sort.js        # unit-test tag sort algorithm (no API calls)
+node scripts/test-version-range.js   # unit-test Slack intent parsing, range selection, signature (no API calls)
 node scripts/backfill-enrich.js      # dry-run enrichment backfill
 node scripts/backfill-enrich.js --write  # actually write to GitHub PRs
 ```
@@ -57,7 +62,11 @@ Env var changes take effect on next deployment. Secrets live in Vercel dashboard
 - `ARTHUR_BASE_URL`, `ARTHUR_API_KEY`, `ARTHUR_TASK_ID`
 
 **Notifications (optional):**
-- `SLACK_WEBHOOK_URL`, `TEAMS_WEBHOOK_URL`
+- `SLACK_WEBHOOK_URL`, `TEAMS_WEBHOOK_URL` — outbound release notifications (Incoming Webhook)
+
+**Interactive Slack bot (`api/slack-events.js`):**
+- `SLACK_BOT_TOKEN` — bot token (`xoxb-…`) with scopes `app_mentions:read` + `chat:write`; used to reply in-thread via the Web API
+- `SLACK_SIGNING_SECRET` — verifies inbound Slack Events API requests
 
 ## Architecture: how release notes are generated
 
@@ -68,6 +77,18 @@ Env var changes take effect on next deployment. Secrets live in Vercel dashboard
 ### GitLab dual-repo pattern
 
 When `GITLAB_SCOPE_PROJECT_ID` is set, `api/gitlab-webhook.js` fetches commits and MRs from both the primary project and the scope project in parallel, then merges them before passing to Claude. This is how Platform release notes include frontend changes alongside backend changes.
+
+### Interactive Slack @mention (cross-version summaries)
+
+`api/slack-events.js` is a Slack Events API endpoint. When a user `@Louisa`-mentions the bot asking for changes between two versions (e.g. *"give me platform changes between 1.4.1892 and 1.4.2227"*), Louisa pulls the **already-published release notes** for every release in that range and asks Claude to consolidate them into one customer-facing summary, posted as a threaded reply. The goal is to show a customer everything that changed between the version they're running and the latest.
+
+Key points:
+- **Source of truth is the published releases, not a fresh commit/PR diff.** Platform reads GitLab Release descriptions (`lib/gitlab.js#getProdTagsSorted` + `getReleaseByTag`); Engine reads GitHub Release bodies (`lib/github.js#listReleasesSorted`). Intent parsing and range selection live in `lib/version-range.js`.
+- **Range rule:** releases with `date(v1) < date <= date(v2)` — everything the customer doesn't yet have, up to and including the target. Versions can be given in either order.
+- **3-second ack:** Slack requires a 200 within 3s, so the handler acks immediately and runs the fetch + Claude call in the background via `waitUntil` (`@vercel/functions`). Delivery retries (`X-Slack-Retry-Num`) are ignored to prevent duplicate replies, and the `url_verification` challenge is echoed for subscription setup.
+- **Auth:** requests are verified with `verifySlackSignature` (`lib/crypto.js`); replies use the bot token via `lib/slack.js#postMessage`.
+
+Slack App setup: add bot scopes `app_mentions:read` + `chat:write`, enable Event Subscriptions with Request URL `https://<deployment>/api/slack-events` subscribed to the `app_mention` event, then set `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` in Vercel.
 
 ### PR/MR enrichment
 
