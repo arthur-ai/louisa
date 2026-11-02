@@ -13,6 +13,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { getCommitsBetweenTags, getMergeRequestsForCommits } from "../lib/gitlab.js";
+import { assertUsableResponse } from "../lib/claude.js";
 
 const GITLAB_API = "https://gitlab.com/api/v4";
 function glHeaders() {
@@ -119,11 +120,13 @@ ${mergeRequests.length === 0
 Please write the customer summary now.`;
 
 const message = await client.messages.create({
-  model: "claude-sonnet-4-6",
-  max_tokens: 1024,
+  model: "claude-sonnet-5-5",
+  max_tokens: 16000,
+  output_config: { effort: "medium" },
   system: systemPrompt,
   messages: [{ role: "user", content: userContent }],
 });
+assertUsableResponse(message, "customer-summary");
 
 const text = message.content
   .filter(b => b.type === "text")

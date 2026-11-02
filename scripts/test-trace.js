@@ -55,8 +55,11 @@ const FAKE_PRS = [
 async function callClaude() {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const msg = await client.messages.create({
-    model: "claude-haiku-4-5",
-    max_tokens: 64,
+    // Haiku 5.5 thinks by default and thinking counts toward max_tokens,
+    // so leave room above the one-sentence reply.
+    model: "claude-haiku-5-5",
+    max_tokens: 1024,
+    output_config: { effort: "low" },
     system: "You are a test assistant. Respond in one sentence only.",
     messages: [{ role: "user", content: "Say: Louisa trace test successful." }],
   });

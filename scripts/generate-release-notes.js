@@ -48,7 +48,7 @@ import {
   getProjectUrl,
 } from "../lib/gitlab.js";
 import { summarizePR } from "../lib/claude.js";
-import { generatePlatformReleaseNotes } from "../lib/claude-platform.js";
+import { writePlatformReleaseNotes } from "../lib/claude-platform.js";
 import { appendSummary, readSummariesForTag, readSummariesInRange } from "../lib/summaries.js";
 import { postReleaseNotification } from "../lib/slack.js";
 
@@ -244,8 +244,9 @@ try {
     const mergeRequests = [...backendMRs, ...frontendMRs];
     console.log(`Louisa: ${mergeRequests.length} MR summaries → release notes (${backendMRs.length} backend, ${frontendMRs.length} frontend)`);
 
-    // 6. Generate release notes — auto-instrumented LLM child span
-    const { text: notes } = await generatePlatformReleaseNotes({
+    // 6. Generate release notes — louisa.write_release_notes CHAIN span (only
+    //    when there are MRs) wrapping the auto-instrumented LLM span
+    const { text: notes } = await writePlatformReleaseNotes(tracer, {
       tagName:       tag,
       releaseName:   tag,
       commits,

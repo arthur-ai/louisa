@@ -95,12 +95,15 @@ The GitHub Action also commits `logs/pr-summaries.jsonl` back to the repo after 
 
 ---
 
-## Two-Model Strategy
+## Model Strategy
 
 | Task | Model | Why |
 |------|-------|-----|
-| Per-PR/MR summarization | `claude-haiku-4-5` | ~10× faster and cheaper; output is 2-3 sentences |
-| Release notes generation | `claude-opus-4-8` | Richer synthesis; runs once per tag in a GitHub Action |
+| Per-PR/MR summarization | `claude-haiku-5-5` | ~10× faster and cheaper; output is 2-3 sentences |
+| Release notes generation and PR/MR enrichment | `claude-opus-5-5` | Richer synthesis; Platform notes run once per tag in a GitHub Action |
+| Slack version-range answers, monthly blog draft, changelog, customer summary | `claude-sonnet-5-5` | Consolidates already-written release notes |
+
+The 5.5 models always think before answering, and thinking counts toward `max_tokens`, so every call sets a generous `max_tokens` and an explicit `output_config.effort` (`low` on the Vercel webhook paths to stay inside the 60-second limit). Calls that would publish text stop with an error on a `refusal` or `max_tokens` stop reason instead of publishing empty or cut-off output.
 
 Haiku also uses [tool use](https://docs.anthropic.com/en/docs/tool-use) with a strict schema — this guarantees structured JSON output without needing to parse free-form text or strip markdown code fences.
 
@@ -180,12 +183,14 @@ louisa.github.release  [CHAIN]
 ├── github.get_previous_tag       [TOOL]   → "v1.4.2"
 ├── github.get_commits            [TOOL]   → 14 commits
 ├── github.get_pull_requests      [TOOL]   → 6 merged PRs
-├── anthropic.messages.create     [LLM]    → claude-opus-4-8
+├── anthropic.messages.create     [LLM]    → claude-opus-5-5
 │       input tokens: 3,847  output tokens: 812
 │       system prompt, user message, full assistant response
 ├── github.create_release         [TOOL]   → https://github.com/…/releases/tag/v1.5.0
 └── slack.post_notification       [TOOL]   → sent
 ```
+
+For Platform (GitLab) releases, the release-notes call sits inside its own `louisa.write_release_notes` CHAIN span, whose `output.value` is the notes markdown. Every Anthropic call is recorded as a span named `Anthropic Messages`, and an Arthur Engine transform picks the first span with a given name, so continuous evals that judge the release notes must target `louisa.write_release_notes`, not `Anthropic Messages`. Releases with no merge requests skip this span, so their evals are skipped rather than failed.
 
 **What Arthur captures automatically:**
 
@@ -733,7 +738,7 @@ The Action commits the updated `logs/pr-summaries.jsonl` back to the repo. Ensur
 ## How It's Built
 
 - **Runtime:** Node.js (ES modules) on Vercel Serverless Functions + GitHub Actions
-- **AI:** Claude Haiku (`claude-haiku-4-5`) for per-PR summarization via tool use; Claude Opus (`claude-opus-4-8`) for final release note generation, via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official SDK
+- **AI:** Claude Haiku (`claude-haiku-5-5`) for per-PR summarization via tool use; Claude Opus (`claude-opus-5-5`) for final release note generation, via the [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript) official SDK
 - **Observability:** OpenTelemetry SDK + [`@arizeai/openinference-instrumentation-anthropic`](https://arize-ai.github.io/openinference/js/packages/openinference-instrumentation-anthropic/) for automatic LLM span instrumentation, OTLP/proto export to [Arthur Evals Engine](https://arthur.ai)
 - **APIs:** GitHub REST API v3 and GitLab REST API v4 (direct fetch, no SDKs)
 - **Auth:** Secret token (GitHub), secret token (GitLab), Bearer/Private tokens for API calls

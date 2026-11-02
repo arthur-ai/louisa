@@ -19,6 +19,7 @@ import { readFileSync, existsSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
+import { assertUsableResponse } from "../lib/claude.js";
 
 // ── Load .env.local ───────────────────────────────────────────────────────────
 // Must run before any env var reads. Uses the same parser as test-trace.js.
@@ -162,11 +163,14 @@ const client = new Anthropic();
 
 console.log("Calling Claude to synthesize changelog...");
 const message = await client.messages.create({
-  model:      "claude-sonnet-4-6",
-  max_tokens: 4096,
-  system:     systemPrompt,
-  messages:   [{ role: "user", content: userMessage }],
+  model:         "claude-sonnet-5-5",
+  max_tokens:    16000,
+  output_config: { effort: "medium" },
+  system:        systemPrompt,
+  messages:      [{ role: "user", content: userMessage }],
 });
+// Stop before an empty or cut-off changelog is upserted to readme.io.
+assertUsableResponse(message, "publish-changelog");
 
 const body = message.content
   .filter((b) => b.type === "text")
