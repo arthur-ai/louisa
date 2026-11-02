@@ -19,6 +19,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { getTracer, activeSpan, forceFlush } from "../lib/otel.js";
+import { assertUsableResponse } from "../lib/claude.js";
 
 // Initialise OTel provider + Anthropic auto-instrumentation before the
 // Anthropic client is constructed so the messages.create() call below
@@ -263,11 +264,13 @@ try {
   }, async (rootSpan) => {
     console.log("Calling Claude to draft blog post...");
     const message = await client.messages.create({
-      model:      "claude-sonnet-4-6",
-      max_tokens: 8192,
-      system:     systemPrompt,
-      messages:   [{ role: "user", content: userMessage }],
+      model:         "claude-sonnet-5-5",
+      max_tokens:    16000,
+      output_config: { effort: "medium" },
+      system:        systemPrompt,
+      messages:      [{ role: "user", content: userMessage }],
     });
+    assertUsableResponse(message, "draft-blog");
 
     const draft = message.content
       .filter((b) => b.type === "text")
