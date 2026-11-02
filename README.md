@@ -187,6 +187,8 @@ louisa.github.release  [CHAIN]
 └── slack.post_notification       [TOOL]   → sent
 ```
 
+For Platform (GitLab) releases, the release-notes call sits inside its own `louisa.write_release_notes` CHAIN span, whose `output.value` is the notes markdown. Every Anthropic call is recorded as a span named `Anthropic Messages`, and an Arthur Engine transform picks the first span with a given name, so continuous evals that judge the release notes must target `louisa.write_release_notes`, not `Anthropic Messages`. Releases with no merge requests skip this span, so their evals are skipped rather than failed.
+
 **What Arthur captures automatically:**
 
 | Signal | Details |
